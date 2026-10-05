@@ -1,3 +1,6 @@
+import asyncio
+import math
+import weakref
 import httpx
 import logging
 from typing import List, Dict, Any, Optional
@@ -15,6 +18,43 @@ logger = logging.getLogger(__name__)
 
 TWITTER_API_URL = "https://api.twitterapi.io/twitter/tweet/advanced_search"
 SYMBOL_REGEX = re.compile(r"^[A-Z0-9]{1,15}$")
+
+
+FETCH_BUDGET_SECONDS = 75
+PAGE_ATTEMPTS = 4
+_monotonic = time.monotonic
+_sleep = asyncio.sleep
+
+
+class _RateLimited(Exception):
+    pass
+
+
+class _RateLimitTimeout(Exception):
+    pass
+
+
+class _RequestGate:
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.not_before = 0.0
+
+
+# Share cooldowns among overlapping fetches using the same credential, without
+# retaining credentials or unbounded inactive per-key state.
+_request_gates = weakref.WeakValueDictionary()
+
+
+def retry_delay(value, attempt):
+    fallback = 5.0 * (2 ** attempt)
+    if isinstance(value, str):
+        try:
+            seconds = float(value) if value.strip().isdigit() else parsedate_to_datetime(value).timestamp() - time.time()
+            if math.isfinite(seconds) and seconds >= 0:
+                return max(5.0, seconds)
+        except (ValueError, TypeError, OverflowError):
+            pass
+    return fallback
 
 
 def parse_twitter_timestamp(ts_str: Optional[str]) -> int:
@@ -72,6 +112,8 @@ class TwitterService:
         if cached and within_validity(cached):
             return cached
         fetched_at = time.time()
+        deadline = _monotonic() + FETCH_BUDGET_SECONDS
+        gate = _request_gates.setdefault(key, _RequestGate())
         tweets, seen, cursors = [], set(), set()
         cursor, reason, calls = None, "missing_key", 0
         if self.api_key and self.api_key.strip():
@@ -82,8 +124,28 @@ class TwitterService:
                     if cursor:
                         params["cursor"] = cursor
                     try:
-                        calls += 1
-                        res = await client.get(TWITTER_API_URL, headers={"X-API-Key": self.api_key}, params=params)
+                        for attempt in range(PAGE_ATTEMPTS):
+                            remaining = deadline - _monotonic()
+                            if remaining <= 0:
+                                raise _RateLimitTimeout()
+                            # Includes waiting for another fetch's in-flight request.
+                            async with asyncio.timeout(remaining):
+                                async with gate.lock:
+                                    delay = max(0.0, gate.not_before - _monotonic())
+                                    if delay >= deadline - _monotonic():
+                                        raise _RateLimitTimeout()
+                                    if delay:
+                                        await _sleep(delay)
+                                    if _monotonic() >= deadline:
+                                        raise _RateLimitTimeout()
+                                    calls += 1
+                                    res = await client.get(TWITTER_API_URL, headers={"X-API-Key": self.api_key}, params=params)
+                                    if getattr(res, "status_code", None) == 429:
+                                        gate.not_before = _monotonic() + retry_delay(res.headers.get("Retry-After"), attempt)
+                                    else:
+                                        break
+                            if attempt == PAGE_ATTEMPTS - 1:
+                                raise _RateLimited()
                         res.raise_for_status()
                         data = res.json()
                         raw = data.get("tweets") or data.get("data") or []
@@ -121,6 +183,12 @@ class TwitterService:
                             break
                         cursors.add(next_cursor)
                         cursor = next_cursor
+                    except _RateLimited:
+                        reason = "rate_limited"
+                        break
+                    except (_RateLimitTimeout, TimeoutError):
+                        reason = "rate_limit_timeout" if gate.not_before > _monotonic() else "fetch_timeout"
+                        break
                     except Exception:
                         logger.warning("Twitter provider unavailable or returned malformed data")
                         reason = "provider_error"

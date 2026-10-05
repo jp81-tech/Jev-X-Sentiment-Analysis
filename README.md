@@ -189,6 +189,10 @@ Ticker request start, receipt time, and source timestamp are preserved separatel
 
 ---
 
+Twitter ingestion retries HTTP 429 on the same cursor up to four total attempts per page. Valid Retry-After delta-seconds or HTTP dates are respected; absent/malformed values use 5/10/20-second backoff. Overlapping searches using the same credential share an in-process request lock and cooldown. The provider-fetch budget is 75 seconds, including waiting and requests; a required delay beyond that budget stops without an early retry.
+
+Persistent HTTP 429 reports `rate_limited`, while cooldown exhaustion reports `rate_limit_timeout`. Provider-fetch deadline expiry without an active cooldown reports `fetch_timeout`; HTTP client exceptions, including read timeouts, report `provider_error`. Other 4xx responses are not retried. Page-call counts include retries. Exhausted searches return partial/unavailable data and cannot produce a model decision from an incomplete sample. Freshness starts at the original fetch start and is not renewed by retries. This coordination is within one worker/process and does not cover other applications using the same key.
+
 ## Local launch and bounded diagnostics
 
 From the repository root, run `sh scripts/launch_local.sh --port 8787`. The launcher uses the existing sibling `../jev-test-env/bin/python`; set `JEV_PYTHON` to an absolute path to another installed virtualenv when needed. It binds only `127.0.0.1` with one worker, uses the existing `JEV_CONFIG_FILE`/environment configuration, and does not create or overwrite `.env`. Missing credentials are reported by name only: the local UI/public market can start, but full analysis remains blocked until both keys are configured. Stop the foreground server with Ctrl-C.
