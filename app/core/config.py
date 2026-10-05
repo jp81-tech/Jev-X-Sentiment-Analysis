@@ -1,5 +1,7 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
+import os
+from pathlib import Path
 
 
 class Settings(BaseSettings):
@@ -27,4 +29,5 @@ class Settings(BaseSettings):
     ADMIN_TOKEN: Optional[str] = None
 
 
-settings = Settings()
+CONFIG_PATH = Path(os.environ.get("JEV_CONFIG_FILE", Path(__file__).resolve().parents[2] / ".env"))
+settings = Settings(_env_file=CONFIG_PATH)

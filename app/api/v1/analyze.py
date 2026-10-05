@@ -4,8 +4,14 @@ from typing import Optional, Dict, Any
 import logging
 import asyncio
 import re
+import os
+import time
+import tempfile
+from pathlib import Path
 
-from app.core.config import settings
+from app.core.config import settings, CONFIG_PATH
+from app.core.freshness import market_is_fresh, within_validity
+from app.core.market_validation import market_numbers_valid
 from app.services.market_service import market_service
 from app.services.twitter_service import twitter_service
 from app.services.stats_service import stats_service
@@ -16,6 +22,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["Analysis"])
 
 KEY_REGEX = re.compile(r"^[A-Za-z0-9_\-\.]{8,128}$")
+settings_lock = asyncio.Lock()
+
 SYMBOL_REGEX = re.compile(r"^[A-Z0-9]{1,15}$")
 
 
@@ -54,22 +62,35 @@ async def analyze_asset(req: AnalyzeRequest) -> Dict[str, Any]:
         # Tier 1: Statistical processing
         social_stats = stats_service.process_tweets(tweets)
 
-        # Tier 2: TypeSafe Jev System One evaluation
-        decision = await typesafe_service.evaluate_decision(
-            symbol=sym,
-            market_data=market_data,
-            social_stats=social_stats
-        )
+        decision = None
+        fresh_market = (market_data.get("status") == "ok" and market_data.get("source") == "kraken"
+                        and not market_data.get("is_fallback")
+                        and market_is_fresh(market_data) and market_numbers_valid(market_data))
+        fresh_social = (twitter_res.get("status") == "ok" and twitter_res.get("source") == "twitterapi.io"
+                        and not twitter_res.get("is_mock")
+                        and len(tweets) == sample_size
+                        and len({t.get("id") for t in tweets}) == sample_size
+                        and all(t.get("id") and t.get("source") == "twitterapi.io" for t in tweets)
+                        and within_validity(twitter_res))
+        social_stats.update({"fetched_at": twitter_res.get("fetched_at"), "valid_until": twitter_res.get("valid_until")})
+        if fresh_market and fresh_social:
+            decision = await typesafe_service.evaluate_decision(symbol=sym, market_data=market_data, social_stats=social_stats)
+        # Check again after the awaited model; both inputs may have expired.
+        if not market_is_fresh(market_data) or not within_validity(twitter_res):
+            decision = None
+        status = "success" if decision else ("degraded" if tweets else "unavailable")
 
         return {
             "symbol": sym,
-            "status": "success",
+            "status": status,
+            "social": {k: v for k, v in twitter_res.items() if k != "tweets"},
+            "model_status": "ok" if decision else "unavailable",
             "market": market_data,
             "social_stats": social_stats,
             "decision": decision,
             "tweets_sample": tweets[:100],  # Return up to 100 representative tweets for UI explorer
             "is_twitter_mock": twitter_res.get("is_mock", False),
-            "is_typesafe_mock": decision.get("is_mock", False)
+            "is_typesafe_mock": bool(decision and decision.get("is_mock"))
         }
 
     except HTTPException:
@@ -124,38 +145,44 @@ async def update_settings(
             detail="Forbidden: Settings modification is restricted to localhost or authenticated requests."
         )
 
-    from pathlib import Path
-    env_path = Path(__file__).resolve().parent.parent.parent.parent / ".env"
+    updates = {}
+    for field, key in (("typesafe_api_key", "TYPESAFE_API_KEY"), ("twitter_api_key", "TWITTER_API_KEY")):
+        value = getattr(payload, field)
+        if value is not None:
+            value = value.strip()
+            if not KEY_REGEX.fullmatch(value):
+                raise HTTPException(status_code=400, detail="Invalid API key format.")
+            updates[key] = value
+    async with settings_lock:
+        env_path = CONFIG_PATH
+        try:
+            # Preserve unrelated configuration verbatim. No runtime mutation before replace.
+            lines = env_path.read_text().splitlines() if env_path.exists() else []
+            lines = [line for line in lines if line.split("=", 1)[0].strip() not in updates]
+            content = "\n".join(lines + [f"{key}={value}" for key, value in updates.items()]) + "\n"
+            atomic_write_settings(env_path, content)
+        except OSError:
+            raise HTTPException(status_code=500, detail="Could not persist settings; runtime unchanged.")
+        for key, value in updates.items():
+            setattr(settings, key, value)
+        typesafe_service.api_key = settings.TYPESAFE_API_KEY
+        twitter_service.api_key = settings.TWITTER_API_KEY
+    return {"status": "success", "has_typesafe_key": bool(settings.TYPESAFE_API_KEY), "has_twitter_key": bool(settings.TWITTER_API_KEY)}
 
-    env_vars = {}
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if "=" in line and not line.strip().startswith("#"):
-                k, v = line.split("=", 1)
-                env_vars[k.strip()] = v.strip()
 
-    if payload.typesafe_api_key is not None and payload.typesafe_api_key.strip():
-        k = payload.typesafe_api_key.strip()
-        if not KEY_REGEX.match(k):
-            raise HTTPException(status_code=400, detail="Invalid TypeSafe API key format.")
-        settings.TYPESAFE_API_KEY = k
-        typesafe_service.api_key = k
-        env_vars["TYPESAFE_API_KEY"] = k
-
-    if payload.twitter_api_key is not None and payload.twitter_api_key.strip():
-        k = payload.twitter_api_key.strip()
-        if not KEY_REGEX.match(k):
-            raise HTTPException(status_code=400, detail="Invalid TwitterAPI key format.")
-        settings.TWITTER_API_KEY = k
-        twitter_service.api_key = k
-        env_vars["TWITTER_API_KEY"] = k
-
-    env_content = "\n".join(f"{k}={v}" for k, v in env_vars.items()) + "\n"
-    env_path.write_text(env_content)
-
-    return {
-        "status": "success",
-        "has_typesafe_key": bool(settings.TYPESAFE_API_KEY),
-        "has_twitter_key": bool(settings.TWITTER_API_KEY)
-    }
-
+def atomic_write_settings(path: Path, content: str):
+    # mkstemp uses mode 0600. Same directory guarantees atomic replacement.
+    fd, temporary = tempfile.mkstemp(prefix=".settings-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        # Do not retain credentials on handled errors or mask the original failure.
+        try:
+            os.unlink(temporary)
+        except OSError:
+            logger.warning("Could not remove failed settings temporary file")
+        raise

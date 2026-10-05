@@ -1,6 +1,12 @@
 // Jev X Sentiment Analysis Terminal Client Controller
 
 let currentDecision = null;
+let currentMarketPair = null;
+let requestGeneration = 0;
+let requestFetchId = 0;
+let decisionExpiresAt = 0;
+let expiryTimer = null;
+const formatPrice = value => Number(value).toLocaleString(undefined, { maximumSignificantDigits: 15 });
 // Set from the last response's market block: true when Kraken failed and the
 // prices in it are placeholder constants rather than quotes.
 let currentPriceIsFallback = false;
@@ -27,6 +33,8 @@ function setupEventListeners() {
     const analyzeBtn = document.getElementById("analyze-btn");
     const copyBtn = document.getElementById("copy-levels-btn");
 
+    symbolInput.addEventListener("input", () => { ++requestGeneration; invalidateDecision("Asset changed — analyze again"); });
+
     // Slider change
     slider.addEventListener("input", (e) => {
         const val = parseInt(e.target.value);
@@ -41,6 +49,8 @@ function setupEventListeners() {
             document.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
             chip.classList.add("active");
             symbolInput.value = chip.dataset.symbol;
+            ++requestGeneration;
+            invalidateDecision("Asset changed — analyze again");
         });
     });
 
@@ -60,7 +70,10 @@ function setupEventListeners() {
 
     // Copy Levels button
     copyBtn.addEventListener("click", () => {
-        if (!currentDecision) return;
+        if (!currentDecision || !currentDecision.trade_levels || Date.now() >= decisionExpiresAt) {
+            invalidateDecision("Stale or unavailable");
+            return;
+        }
         if (currentPriceIsFallback) {
             const orig = copyBtn.textContent;
             copyBtn.textContent = "No live price";
@@ -71,12 +84,12 @@ function setupEventListeners() {
         const lvls = d.trade_levels;
         const text = [
             `--- JEV X SENTIMENT ANALYSIS TRADE TICKET ---`,
-            `Asset: ${d.symbol}/USDT`,
+            `Asset: ${currentMarketPair}`,
             `Action: ${d.action} (${d.confidence_pct}% Confidence)`,
-            `Entry Range: $${lvls.entry_range[0].toLocaleString()} - $${lvls.entry_range[1].toLocaleString()}`,
-            `Stop Loss: $${lvls.stop_loss.toLocaleString()} (${lvls.stop_loss_pct}%)`,
-            `Target 1: $${lvls.target_1.toLocaleString()} (${lvls.target_1_pct > 0 ? '+' : ''}${lvls.target_1_pct}%)`,
-            `Target 2: $${lvls.target_2.toLocaleString()} (${lvls.target_2_pct > 0 ? '+' : ''}${lvls.target_2_pct}%)`,
+            `Entry Range: $${formatPrice(lvls.entry_range[0])} - $${formatPrice(lvls.entry_range[1])}`,
+            `Stop Loss: $${formatPrice(lvls.stop_loss)} (${lvls.stop_loss_pct}%)`,
+            `Target 1: $${formatPrice(lvls.target_1)} (${lvls.target_1_pct > 0 ? '+' : ''}${lvls.target_1_pct}%)`,
+            `Target 2: $${formatPrice(lvls.target_2)} (${lvls.target_2_pct > 0 ? '+' : ''}${lvls.target_2_pct}%)`,
             `Risk/Reward: ${lvls.risk_reward_ratio} R:R`,
             `Rationale: ${d.rationale}`
         ].join("\n");
@@ -138,12 +151,12 @@ function setupEventListeners() {
                 if (data.has_typesafe_key) {
                     const pill = document.getElementById("typesafe-status");
                     pill.className = "status-pill status-active";
-                    document.getElementById("typesafe-status-text").textContent = "TypeSafe AI: Live";
+                    document.getElementById("typesafe-status-text").textContent = "TypeSafe AI: Configured";
                 }
                 if (data.has_twitter_key) {
                     const pill = document.getElementById("twitter-status");
                     pill.className = "status-pill status-active";
-                    document.getElementById("twitter-status-text").textContent = "TwitterAPI: Connected";
+                    document.getElementById("twitter-status-text").textContent = "TwitterAPI: Configured";
                 }
 
                 closeModal();
@@ -167,6 +180,9 @@ async function runAnalysis(symbol, sampleSize) {
     const spinner = document.getElementById("loading-spinner");
     const btnText = analyzeBtn.querySelector(".btn-text");
 
+    const generation = ++requestGeneration;
+    const fetchId = ++requestFetchId;
+    invalidateDecision("Loading");
     analyzeBtn.disabled = true;
     spinner.classList.remove("hidden");
     btnText.textContent = "Ingesting & Analyzing...";
@@ -184,15 +200,19 @@ async function runAnalysis(symbol, sampleSize) {
         }
 
         const data = await response.json();
-        updateUI(data);
+        if (generation === requestGeneration) updateUI(data);
 
     } catch (err) {
+        if (generation !== requestGeneration) return;
+        invalidateDecision("Unavailable");
         console.error("Error analyzing asset:", err);
         alert(`Analysis Error: ${err.message}`);
     } finally {
-        analyzeBtn.disabled = false;
-        spinner.classList.add("hidden");
-        btnText.textContent = "Analyze Asset";
+        if (fetchId === requestFetchId) {
+            analyzeBtn.disabled = false;
+            spinner.classList.add("hidden");
+            btnText.textContent = "Analyze Asset";
+        }
     }
 }
 
@@ -202,7 +222,33 @@ function updateUI(data) {
     const decision = data.decision || {};
     const tweets = data.tweets_sample || [];
 
+    const fresh = input => Number.isFinite(input?.fetched_at) && Number.isFinite(input?.valid_until)
+        && input.fetched_at <= Date.now() / 1000 && Date.now() / 1000 < input.valid_until;
+    const marketClockValid = fresh(market) && Number.isFinite(market.request_started_at)
+        && market.request_started_at <= market.fetched_at && Date.now() / 1000 - market.request_started_at < 120
+        && (market.source_timestamp === null
+            ? market.freshness_basis === "request_start" && market.valid_until <= market.request_started_at + 120
+            : market.freshness_basis === "source_timestamp" && Number.isFinite(market.source_timestamp)
+              && Date.now() / 1000 - market.source_timestamp >= 0 && Date.now() / 1000 - market.source_timestamp < 120
+              && market.valid_until <= Math.min(market.request_started_at, market.source_timestamp) + 120);
+    const valid = data.status === "success" && data.model_status === "ok" && !data.is_twitter_mock && !data.is_typesafe_mock
+        && !decision.is_mock && !!decision.action && market.status === "ok" && !market.is_fallback
+        && marketClockValid
+        && data.social?.status === "ok" && fresh(data.social);
+    if (!valid) {
+        invalidateDecision(data.social?.status === "partial" ? "Partial sample — no decision" : "Unavailable or stale");
+        document.getElementById("twitter-status-text").textContent = `TwitterAPI: ${data.social?.status || "unavailable"}`;
+        document.getElementById("tweet-count-badge").textContent = `${stats.sample_size || 0} / ${data.social?.target_count || "?"} tweets`;
+        return;
+    }
     currentDecision = decision;
+    currentMarketPair = typeof market.pair === "string" && /^[A-Z0-9]+\/[A-Z0-9]+$/.test(market.pair)
+        ? market.pair : `${data.symbol}/USD`;
+    decisionExpiresAt = Math.min(market.valid_until, data.social.valid_until) * 1000;
+    clearTimeout(expiryTimer);
+    expiryTimer = setTimeout(() => invalidateDecision("Stale — refresh analysis"), Math.max(0, decisionExpiresAt - Date.now()));
+    document.getElementById("typesafe-status-text").textContent = "TypeSafe AI: Available";
+    document.getElementById("twitter-status-text").textContent = "TwitterAPI: Complete";
 
     // 1. Ticker Ribbon
     // Kraken failed for this symbol and market_service returned placeholder
@@ -211,20 +257,21 @@ function updateUI(data) {
     const isFallback = market.is_fallback === true;
     currentPriceIsFallback = isFallback;
 
-    document.getElementById("ticker-symbol").textContent = `${data.symbol}/USDT`;
+    document.getElementById("ticker-symbol").textContent = currentMarketPair;
     const priceEl = document.getElementById("ticker-price");
-    priceEl.textContent = isFallback ? "unavailable" : `$${(market.price || 0).toLocaleString()}`;
+    priceEl.textContent = isFallback ? "unavailable" : `$${formatPrice(market.price)}`;
     priceEl.classList.toggle("val-unavailable", isFallback);
 
     const changeEl = document.getElementById("ticker-change");
-    const change = market.change_24h_pct || 0;
-    changeEl.textContent = isFallback ? "—" : `${change > 0 ? '+' : ''}${change}%`;
-    changeEl.className = isFallback
+    const change = market.change_24h_pct;
+    const hasChange = !isFallback && Number.isFinite(change);
+    changeEl.textContent = hasChange ? `${change > 0 ? '+' : ''}${change}%` : "—";
+    changeEl.className = !hasChange
         ? "ticker-val font-mono val-unavailable"
         : `ticker-val font-mono ${change >= 0 ? 'text-success' : 'text-danger'}`;
 
     const fundingEl = document.getElementById("ticker-funding");
-    if (isFallback || market.funding_rate_pct === null || market.funding_rate_pct === undefined) {
+    if (isFallback || !Number.isFinite(market.funding_rate_pct)) {
         fundingEl.textContent = "—";
         fundingEl.className = "ticker-val font-mono val-unavailable";
     } else {
@@ -235,7 +282,7 @@ function updateUI(data) {
 
     const oiEl = document.getElementById("ticker-oi");
     if (oiEl) {
-        if (isFallback || !market.open_interest_usd) {
+        if (isFallback || !Number.isFinite(market.open_interest_usd)) {
             oiEl.textContent = "—";
             oiEl.classList.toggle("val-unavailable", true);
         } else {
@@ -245,12 +292,13 @@ function updateUI(data) {
     }
 
     const rsiEl = document.getElementById("ticker-rsi");
-    rsiEl.textContent = isFallback ? "—" : (market.rsi_14 || "--");
+    rsiEl.textContent = isFallback ? "—" : (market.rsi_14 ?? "--");
     rsiEl.classList.toggle("val-unavailable", isFallback);
 
     const volEl = document.getElementById("ticker-vol");
-    volEl.textContent = isFallback ? "—" : `$${((market.volume_24h_usd || 0) / 1e6).toFixed(1)}M`;
-    volEl.classList.toggle("val-unavailable", isFallback);
+    const hasVolume = !isFallback && Number.isFinite(market.volume_24h_usd);
+    volEl.textContent = hasVolume ? `$${(market.volume_24h_usd / 1e6).toFixed(1)}M` : "—";
+    volEl.classList.toggle("val-unavailable", !hasVolume);
 
     // 2. Decision Hero
     const badge = document.getElementById("action-badge");
@@ -275,9 +323,9 @@ function updateUI(data) {
     const banner = document.getElementById("market-fallback-banner");
     if (banner) banner.hidden = !isFallback;
     const copyBtn = document.getElementById("copy-levels-btn");
-    if (copyBtn) copyBtn.disabled = isFallback;
+    if (copyBtn) copyBtn.disabled = isFallback || !decision.trade_levels;
     const levelCells = ["lvl-entry", "lvl-sl", "lvl-tp1", "lvl-tp2", "lvl-rr"];
-    if (isFallback) {
+    if (isFallback || !decision.trade_levels) {
         for (const id of levelCells) {
             const el = document.getElementById(id);
             el.textContent = "—";
@@ -287,10 +335,10 @@ function updateUI(data) {
         for (const id of levelCells) document.getElementById(id).classList.remove("val-unavailable");
         const lvls = decision.trade_levels || {};
         const entry = lvls.entry_range || [market.price, market.price];
-        document.getElementById("lvl-entry").textContent = `$${entry[0].toLocaleString()} - $${entry[1].toLocaleString()}`;
-        document.getElementById("lvl-sl").textContent = `$${(lvls.stop_loss || 0).toLocaleString()} (${lvls.stop_loss_pct || 0}%)`;
-        document.getElementById("lvl-tp1").textContent = `$${(lvls.target_1 || 0).toLocaleString()} (+${lvls.target_1_pct || 0}%)`;
-        document.getElementById("lvl-tp2").textContent = `$${(lvls.target_2 || 0).toLocaleString()} (+${lvls.target_2_pct || 0}%)`;
+        document.getElementById("lvl-entry").textContent = `$${formatPrice(entry[0])} - $${formatPrice(entry[1])}`;
+        document.getElementById("lvl-sl").textContent = `$${formatPrice(lvls.stop_loss)} (${lvls.stop_loss_pct || 0}%)`;
+        document.getElementById("lvl-tp1").textContent = `$${formatPrice(lvls.target_1)} (+${lvls.target_1_pct || 0}%)`;
+        document.getElementById("lvl-tp2").textContent = `$${formatPrice(lvls.target_2)} (+${lvls.target_2_pct || 0}%)`;
         document.getElementById("lvl-rr").textContent = `${lvls.risk_reward_ratio || 2.0}:1 Expected R:R`;
     }
 
@@ -366,29 +414,13 @@ function renderProbabilityDistribution(decision) {
         isWinner: act === winnerAction,
     }));
 
-    // Fallback distribution if rawProbs is missing or empty
     const totalSum = items.reduce((acc, it) => acc + it.pct, 0);
-    if (totalSum < 1.0) {
-        const winnerPct = decision.confidence_pct || 40.0;
-        const remainder = Math.max(0, 100.0 - winnerPct);
-        const weights = {
-            HOLD: 0.35,
-            BUY: 0.25,
-            STRONG_BUY: 0.15,
-            TAKE_PROFIT: 0.12,
-            SELL: 0.08,
-            STRONG_SELL: 0.05,
-        };
-        items = allActions.map((act) => {
-            if (act === winnerAction) {
-                return { action: act, pct: winnerPct, isWinner: true };
-            }
-            return {
-                action: act,
-                pct: parseFloat((remainder * (weights[act] || 0.15)).toFixed(1)),
-                isWinner: false,
-            };
-        });
+    if (!allActions.every(act => Number.isFinite(rawProbs[act]) && rawProbs[act] >= 0 && rawProbs[act] <= 100) || Math.abs(totalSum - 100) > 0.0001) {
+        container.textContent = "Distribution unavailable";
+        if (winnerNote) winnerNote.textContent = "No distribution supplied";
+        if (footerEl) footerEl.textContent = "";
+        if (confSub) confSub.textContent = "Provider confidence (separate from action probability)";
+        return;
     }
 
     // Sort descending by percentage so highest probability signal is on top
@@ -401,11 +433,11 @@ function renderProbabilityDistribution(decision) {
     const margin = (winnerItem.pct - runnerUp.pct).toFixed(1);
 
     if (winnerNote) {
-        winnerNote.innerHTML = `Top: <span class="highlight-action">${winnerAction}</span> (${winnerItem.pct}%) · Total: ${calculatedSum}%`;
+        winnerNote.innerHTML = `Selected: <span class="highlight-action">${winnerAction}</span> (${winnerItem.pct}%) · Total: ${calculatedSum}%`;
     }
 
     if (confSub) {
-        confSub.textContent = `Highest across 6 signals (Total: 100%)`;
+        confSub.textContent = `Provider confidence (separate from action probability)`;
     }
 
     container.innerHTML = items
@@ -424,14 +456,14 @@ function renderProbabilityDistribution(decision) {
             }
 
             const friendlyName = item.action.replace(/_/g, " ");
-            const barWidth = Math.min(100, Math.max(item.pct, 2));
+            const barWidth = Math.min(100, Math.max(item.pct, 0));
 
             return `
                 <div class="dist-row ${item.isWinner ? 'is-winner-row' : ''}">
                     <div class="dist-row-label">
                         <span class="dist-action-name ${item.isWinner ? 'is-winner' : ''}">
                             <span class="action-text">${friendlyName}</span>
-                            ${item.isWinner ? '<span class="winner-pill">✓ HIGHEST (CHOSEN)</span>' : ''}
+                            ${item.isWinner ? '<span class="winner-pill">✓ CHOSEN</span>' : ''}
                         </span>
                         <span class="dist-pct font-mono ${item.isWinner ? 'is-winner' : ''}">${item.pct.toFixed(1)}%</span>
                     </div>
@@ -451,8 +483,32 @@ function renderProbabilityDistribution(decision) {
             </div>
             <div class="dist-footer-item">
                 <span class="footer-label">Selection Logic:</span>
-                <span class="footer-val font-mono" style="color: var(--text-secondary);">${winnerAction} chosen with highest probability (+${margin}% over runner-up ${runnerUp.action})</span>
+                <span class="footer-val font-mono" style="color: var(--text-secondary);">${winnerAction} selected; difference (+${margin}% over runner-up ${runnerUp.action})</span>
             </div>
         `;
+    }
+}
+
+function invalidateDecision(reason) {
+    currentDecision = null;
+    currentMarketPair = null;
+    currentPriceIsFallback = true;
+    decisionExpiresAt = 0;
+    clearTimeout(expiryTimer);
+    for (const id of ["ticker-symbol", "confidence-val", "squeeze-val", "catalyst-val", "lvl-entry", "lvl-sl", "lvl-tp1", "lvl-tp2", "lvl-rr", "ticker-price", "ticker-change", "ticker-funding", "ticker-oi", "ticker-rsi", "ticker-vol", "sentiment-label-val", "diversity-val", "dist-winner-note", "conf-sub-text"]) {
+        document.getElementById(id).textContent = "—";
+    }
+    document.getElementById("action-badge").textContent = reason;
+    document.getElementById("action-badge").className = "action-badge badge-hold";
+    document.getElementById("rationale-box").textContent = "No current decision available.";
+    document.getElementById("copy-levels-btn").disabled = true;
+    document.getElementById("dist-bars-container").textContent = "Distribution unavailable";
+    document.getElementById("dist-footer").textContent = "";
+    document.getElementById("tweet-list").textContent = "No current sample";
+    document.getElementById("tweet-count-badge").textContent = "0 Tweets";
+    document.getElementById("sentiment-sub").textContent = "Keyword heuristic unavailable";
+    for (const provider of ["typesafe", "twitter"]) {
+        document.getElementById(`${provider}-status`).className = "status-pill status-warning";
+        document.getElementById(`${provider}-status-text`).textContent = `${provider}: ${reason}`;
     }
 }

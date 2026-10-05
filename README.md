@@ -30,12 +30,11 @@ User Search (e.g. "SOL", 500 tweets)
        • 25 most recent breaking tweets (current real-time narrative)
             │
             ▼
-   Tier 2: Early-Stopping Database Deduplication (API Cost Optimization)
-   - To save API credits, the system stores all ingested tweets in a local SQLite database (`data/market_intel.db`).
-   - TwitterAPI.io returns tweets in reverse-chronological order (`queryType="Latest"`).
-   - During pagination, **as soon as a returned tweet ID already exists in the local database, the pagination loop halts immediately**.
-   - Any remaining tweets required to fulfill your requested sample size (e.g., 500 tweets) are loaded directly from the local database.
-   - **Result**: On repeated or intraday searches, you only pay for the few brand-new tweets posted since your last search (often 1 page call = ~$0.006) instead of re-fetching hundreds of tweets you already have.
+   Tier 2: Source-aware storage and pagination
+   - Fetch until the requested unique sample, end of results, no cursor progress, or 100 pages.
+   - Known IDs do not stop pagination; overlapping pages are deduplicated.
+   - SQLite records are keyed by source and ID, with separate asset relationships.
+   - Partial samples remain visible as partial; they do not produce a decision.
             │
             ▼
    Tier 3: TypeSafe Jev System One Evaluation (`typesafe-sdk`)
@@ -47,7 +46,7 @@ User Search (e.g. "SOL", 500 tweets)
             │
             ▼
    Decision Card Displayed in Web Terminal
-   - Recommended action with calibrated confidence percentage
+   - Recommended action with provider confidence percentage (separate from action probabilities)
    - Macro sentiment gauge across all 500 tweets
    - Calculated entry range, stop loss, and target levels
    - User executes manually on their exchange of choice
@@ -67,7 +66,7 @@ You can configure the tweet sample size in the terminal interface based on your 
 | **500 Tweets** | ~$0.0750 | ~$0.0008 | **~$0.076 (7.6¢)** | Comprehensive sentiment & news audit |
 | **1,000 Tweets** | ~$0.1500 | ~$0.0008 | **~$0.151 (15¢)** | Major regime shift or ETF/catalyst investigation |
 
-*Note: Repeated searches for the same asset within a 10-minute window hit the local cache and cost $0.00.*
+*Cost figures above are estimates, not measured bills. A complete social sample is cached for the configured TTL; market and model calls are separate and may still incur costs. Pagination overlap can increase provider billing.*
 
 ---
 
@@ -153,10 +152,25 @@ http://localhost:8000
 ### 4. Running the Automated Test Suite
 
 ```bash
-pytest -v
+python -m pytest -q
+node --check app/static/js/app.js
 ```
 
 ---
+
+## Data availability and local tests
+
+Missing keys, provider errors, invalid market prices/candles, stale inputs, and partial social samples return `unavailable` or `degraded` with `decision: null`. There is no generated demo data or replacement decision. The UI clears previous decisions and disables copying on failure, asset change, and expiry. HOLD and TAKE_PROFIT have no entry/stop/target ticket. BUY/SELL levels use a fixed-percentage heuristic, rounded to the instrument tick size; they are not levels predicted by the model.
+
+RSI uses closed hourly candles only, with 50 for a flat series and no value for insufficient history. An absent provider probability distribution remains null; confidence is never derived from that distribution. Keyword polarity is an uncalibrated word-count heuristic.
+
+Present spot metadata must be finite and within its valid range: a 24h change cannot be below -100%, high/low must be positive and ordered, and volumes cannot be negative. Invalid provider values block analysis before a model call. Invalid cached entries are refetched; the model adapter separately rejects invalid numeric input. Missing optional metadata remains null; missing price change gives `momentum_bucket=unknown`. The model receives that missing value explicitly and the UI shows a dash rather than 0%. Invalid optional futures data is discarded as unavailable, without disabling an otherwise valid spot analysis.
+
+The default pytest suite is offline: network/DNS are blocked before application imports, provider replies are synthetic, and database/config paths are temporary. Node is required for DOM contract tests. These tests do not establish live provider compatibility or economic effectiveness.
+
+`JEV_CONFIG_FILE` overrides the same configuration path for reading and atomic settings writes. `JEV_DB_PATH` overrides SQLite storage. Importing the application does not initialize SQLite. On first storage access, existing `tweets` records remain quarantined in their original table. A private temporary SQLite backup must pass integrity, legacy schema and exact legacy-content checks (all values, storage types and duplicate counts, independent of insertion order) before it is fsynced and atomically published as `<database>.legacy-backup`; only then are v2 tables added. Incomplete existing backups are rebuilt from the preserved legacy data even if a former migration already created v2. Valid existing copies are preserved. Legacy entries are never promoted to a live source automatically. Historical storage is not used to silently fill current searches.
+
+Ticker request start, receipt time, and source timestamp are preserved separately. Kraken may not provide a source timestamp: it remains null, with `freshness_basis=request_start` and `valid_until=request_started_at+120`. Observation/request age does not establish the source quotation age. When a valid source timestamp exists, the deadline is `min(request_started_at, source_timestamp)+120`; malformed or future source timestamps are rejected. Absolute `valid_until` deadlines are checked after market fetches and model completion for both market and social inputs, and also in the UI. Handled settings write failures remove their private temporary file; `.settings-*` is ignored by Git as crash protection. Settings writes are serialized within one application process and replace the file before changing runtime keys; use a single worker for this local settings workflow.
 
 ## Usage Workflow
 
@@ -174,6 +188,19 @@ pytest -v
 **Not Financial Advice**: This software is created strictly for educational, research, and technical demonstration purposes. None of the quantitative models, sentiment scores, trade levels, or verdicts generated by this platform constitute financial, investment, or trading advice. Trading cryptocurrencies carries a significant risk of financial loss. Always perform your own due diligence and never trade with funds you cannot afford to lose.
 
 ---
+
+## Local launch and bounded diagnostics
+
+From the repository root, run `sh scripts/launch_local.sh --port 8787`. The launcher uses the existing sibling `../jev-test-env/bin/python`; set `JEV_PYTHON` to an absolute path to another installed virtualenv when needed. It binds only `127.0.0.1` with one worker, uses the existing `JEV_CONFIG_FILE`/environment configuration, and does not create or overwrite `.env`. Missing credentials are reported by name only: the local UI/public market can start, but full analysis remains blocked until both keys are configured. Stop the foreground server with Ctrl-C.
+
+Using that same Python runtime, run either:
+
+```sh
+../jev-test-env/bin/python -B scripts/diagnose_local.py market --port 8787
+../jev-test-env/bin/python -B scripts/diagnose_local.py analysis --port 8787
+```
+
+The market mode requests BTC public market data. Analysis mode checks credential-presence booleans through local `/health`, then submits exactly one BTC/50 analysis request; provider calls may incur usage. Neither mode retries or follows HTTP redirects. The probe reads no configuration file itself and prints only technical statuses, freshness timestamps, sample/page counts, versions installed in the probe interpreter (not proof of server versions) and safe error codes. It does not print recommendations, tweets, credential values, remote URLs or exception details. HTTP200 alone or a null decision cannot produce `LIVE_CHECK_OK`; missing keys produce `BLOCKED`, and failed/partial/expired/unverifiable results produce `UNKNOWN` (exit78). Reported elapsed time is the local HTTP request duration, not independent provider-stage latency. Model/provider-specific failure causes remain unknown when the application does not expose a safe code. A timeout is inconclusive and should not trigger an automatic retry; the server may still be completing that one request.
 
 ## License
 

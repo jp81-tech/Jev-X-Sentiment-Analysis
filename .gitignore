@@ -17,6 +17,7 @@ venv.bak/
 myenv/
 
 # Environment variables & secrets
+.settings-*
 .env
 .env.local
 .env.*.local
@@ -26,6 +27,8 @@ myenv/
 *.db
 *.sqlite
 *.sqlite3
+*.legacy-backup
+.legacy-backup-*.tmp
 data/
 app/data/
 

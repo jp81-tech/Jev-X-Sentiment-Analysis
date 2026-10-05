@@ -1,3 +1,4 @@
+import re
 from typing import List, Dict, Any
 
 
@@ -56,7 +57,7 @@ class StatsService:
 
             # Text polarity check
             text_lower = t.get("text", "").lower()
-            words = set(text_lower.replace("$", "").replace("#", "").split())
+            words = set(re.findall(r"\b\w+\b", text_lower))
 
             fear_hits = len(words.intersection(FEAR_KEYWORDS))
             greed_hits = len(words.intersection(GREED_KEYWORDS))
@@ -133,6 +134,7 @@ class StatsService:
             "avg_engagement": avg_engagement,
             "fear_mentions": fear_count,
             "greed_mentions": greed_count,
+            "polarity_method": "keyword_heuristic",
             "polarity_score": polarity_score,
             "sentiment_label": sentiment_label,
             "stratified_sample": stratified_sample

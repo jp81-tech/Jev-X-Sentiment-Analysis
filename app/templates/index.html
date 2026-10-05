@@ -31,13 +31,13 @@
                 <div class="status-pill {% if has_typesafe_key %}status-active{% else %}status-warning{% endif %}"
                     id="typesafe-status">
                     <span class="status-dot"></span>
-                    <span id="typesafe-status-text">TypeSafe AI: {% if has_typesafe_key %}Live{% else %}Demo Mode{%
+                    <span id="typesafe-status-text">TypeSafe AI: {% if has_typesafe_key %}Configured{% else %}Not configured{%
                         endif %}</span>
                 </div>
                 <div class="status-pill {% if has_twitter_key %}status-active{% else %}status-warning{% endif %}"
                     id="twitter-status">
                     <span class="status-dot"></span>
-                    <span id="twitter-status-text">TwitterAPI: {% if has_twitter_key %}Connected{% else %}Simulated{%
+                    <span id="twitter-status-text">TwitterAPI: {% if has_twitter_key %}Configured{% else %}Not configured{%
                         endif %}</span>
                 </div>
                 <button class="settings-btn" id="open-settings-btn" title="Configure API Keys">
@@ -55,7 +55,7 @@
                 </div>
                 <div class="modal-body">
                     <p class="modal-desc">
-                        Enter your API keys to switch from demo simulation to live TypeSafe Jev System One reasoning and
+                        Enter your API keys to enable TypeSafe Jev System One reasoning and
                         real-time TwitterAPI.io tweet search.
                     </p>
 
@@ -125,7 +125,7 @@
         <section class="ticker-ribbon" id="ticker-ribbon">
             <div class="ticker-item">
                 <span class="ticker-label">Asset</span>
-                <span class="ticker-val" id="ticker-symbol">BTC/USDT</span>
+                <span class="ticker-val" id="ticker-symbol">—</span>
             </div>
             <div class="ticker-item">
                 <span class="ticker-label">Current Price</span>
@@ -170,8 +170,8 @@
                         </div>
                         <div class="confidence-box">
                             <span class="conf-num font-mono" id="confidence-val">--%</span>
-                            <span class="conf-label">Calibrated Confidence</span>
-                            <span class="conf-sub font-mono" id="conf-sub-text">Plurality across 6 signals</span>
+                            <span class="conf-label">Provider Confidence</span>
+                            <span class="conf-sub font-mono" id="conf-sub-text">Separate from action probability</span>
                         </div>
                     </div>
 
@@ -202,12 +202,12 @@
                     <div class="trade-levels-box">
                         <div class="fallback-banner" id="market-fallback-banner" hidden>
                             <strong>No live price for this symbol.</strong>
-                            The exchange lookup failed, so the market block below is placeholder data.
-                            Trade levels are withheld: they would be arithmetic on a number that is not a price.
+                            The exchange lookup failed; current market data is unavailable.
+                            Trade levels are withheld until valid current inputs are available.
                         </div>
                         <div class="levels-header">
                             <span>Calculated Trade Levels (Manual Execution)</span>
-                            <button class="copy-btn" id="copy-levels-btn" title="Copy to clipboard">
+                            <button class="copy-btn" id="copy-levels-btn" disabled title="Copy to clipboard">
                                 📋 Copy Levels
                             </button>
                         </div>
