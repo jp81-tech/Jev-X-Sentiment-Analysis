@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
+from pydantic import Field
 import os
 from pathlib import Path
 
@@ -9,7 +10,7 @@ class Settings(BaseSettings):
 
     APP_NAME: str = "Jev X Sentiment Analysis"
     APP_VERSION: str = "1.0.0"
-    HOST: str = "0.0.0.0"
+    HOST: str = "127.0.0.1"
     PORT: int = 8000
     DEBUG: bool = False
 
@@ -26,6 +27,8 @@ class Settings(BaseSettings):
 
     # Security
     ALLOWED_ORIGINS: str = "http://localhost:8000,http://127.0.0.1:8000,http://localhost:8787,http://127.0.0.1:8787"
+    ALLOWED_HOSTS: str = "localhost,127.0.0.1,::1"
+    SOCIAL_WINDOW_HOURS: int = Field(24, ge=1, le=168)
     ADMIN_TOKEN: Optional[str] = None
 
 

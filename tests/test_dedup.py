@@ -8,7 +8,7 @@ from app.core import database as database_module
 
 
 def tweet(i):
-    return {"id": str(i), "text": "buy!", "createdAt": "2026-10-04T00:00:00Z", "author": {"userName": "alice"}}
+    return {"id": str(i), "text": "buy!", "createdAt": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(), "author": {"userName": "alice"}}
 
 class Client:
     pages = []

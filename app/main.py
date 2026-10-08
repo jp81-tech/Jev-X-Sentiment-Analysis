@@ -2,6 +2,9 @@ from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import HTTPException
+from fastapi.responses import JSONResponse
+from app.core.access import require_host
 from pathlib import Path
 
 from app.core.config import settings
@@ -26,6 +29,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def allowed_host(request, call_next):
+    # URL parsing preserves IPv6 literals; no DNS resolution or wildcard trust.
+    try:
+        require_host(request)
+    except HTTPException:
+        return JSONResponse({"detail": "Forbidden host"}, status_code=403)
+    return await call_next(request)
 
 # Mount Static Files and Templates
 static_dir = BASE_DIR / "static"

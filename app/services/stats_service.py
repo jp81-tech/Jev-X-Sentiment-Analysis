@@ -18,7 +18,7 @@ class StatsService:
     def process_tweets(tweets: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Tier 1 Deterministic Pre-Processing across all N ingested tweets.
-        Calculates engagement velocity, author diversity, polarity score,
+        Calculates weighted mean engagement per post, author diversity, polarity score,
         and extracts a stratified sample for TypeSafe System One evaluation.
         """
         if not tweets:

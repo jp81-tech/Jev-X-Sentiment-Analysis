@@ -105,3 +105,89 @@ def test_target_count_matches_requested_sample(value):
     else:
         payload['social']['target_count'] = value
     assert diagnostic.classify(payload, 'analysis', NOW)['status'] == 'UNKNOWN'
+
+
+def test_probe_token_transport_against_asgi(monkeypatch):
+    import asyncio
+    import io
+    import urllib.error
+    import httpx
+    from app.main import app
+    from app.core.config import settings
+    from app.api.v1 import analyze as api
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(settings,'ADMIN_TOKEN','SYNTHETIC_ACCESS_SECRET')
+    provider=AsyncMock(return_value=valid_payload()['market'])
+    monkeypatch.setattr(api.market_service,'get_market_data',provider)
+    class Reply(io.BytesIO):
+        status=200
+    class Opener:
+        def open(self,req,timeout):
+            async def send():
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://127.0.0.1:8787') as c:
+                    return await c.request(req.get_method(),req.full_url,headers=dict(req.header_items()),content=req.data)
+            res=asyncio.run(send())
+            if res.status_code>=400:
+                raise urllib.error.HTTPError(req.full_url,res.status_code,'SYNTHETIC_ACCESS_SECRET',{},None)
+            return Reply(res.content)
+    monkeypatch.setattr(diagnostic.urllib.request,'build_opener',lambda *args:Opener())
+    for token,status in [(None,'BLOCKED'),('wrong','BLOCKED'),('SYNTHETIC_ACCESS_SECRET','LIVE_CHECK_OK')]:
+        result=diagnostic.probe('market',8787,lambda p,path,body=None:diagnostic.request(p,path,body,token=token),lambda:NOW)
+        assert result['status']==status
+        if status=='BLOCKED':assert result['code']=='ACCESS_DENIED'
+        assert 'SYNTHETIC_ACCESS_SECRET' not in json.dumps(result)
+    assert provider.call_count==1
+
+
+@pytest.mark.parametrize('source',['--token-env','--token-stdin'])
+@pytest.mark.parametrize('token',['SYNTHETIC_ACCESS_SECRET','café'])
+def test_probe_explicit_token_input_not_echoed(monkeypatch,capsys,source,token):
+    import io
+    monkeypatch.setenv('ADMIN_TOKEN',token)
+    monkeypatch.setattr(diagnostic.sys,'stdin',io.StringIO(token+'\n'))
+    monkeypatch.setattr(diagnostic.sys,'argv',['diagnose_local.py','market',source])
+    calls=[]
+    def request(port,path,body=None,token=None):
+        calls.append(token)
+        return ({'status':'healthy'} if path=='/health' else valid_payload()['market']),{'http_code':200}
+    monkeypatch.setattr(diagnostic,'request',request)
+    monkeypatch.setattr(diagnostic,'probe',lambda mode,port,requester: (requester(port,'/health'),{'status':'UNKNOWN'})[1])
+    assert diagnostic.main()==78 and calls==[token]
+    captured = capsys.readouterr()
+    assert token not in captured.out + captured.err
+
+
+def test_launcher_exact_origin_selected_port(monkeypatch):
+    import sys
+    import uvicorn
+    from scripts import launch_local
+    from app.core.config import settings
+    monkeypatch.setattr(sys,'argv',['launch_local.py','--port','8912'])
+    monkeypatch.setattr(settings,'ALLOWED_ORIGINS',settings.ALLOWED_ORIGINS)
+    monkeypatch.setattr(settings,'ALLOWED_HOSTS',settings.ALLOWED_HOSTS)
+    calls=[]
+    def run(app,**kwargs):
+        calls.append(kwargs)
+        assert settings.ALLOWED_ORIGINS=='http://127.0.0.1:8912,http://localhost:8912'
+        assert settings.ALLOWED_HOSTS=='127.0.0.1,localhost'
+    monkeypatch.setattr(uvicorn,'run',run)
+    assert launch_local.main()==0
+    assert calls[0]['host']=='127.0.0.1' and calls[0]['port']==8912 and calls[0]['proxy_headers'] is False
+
+
+@pytest.mark.parametrize('source',['--token-env','--token-stdin'])
+def test_invalid_header_token_rejected_before_any_request(monkeypatch,capsys,source):
+    import io
+    secret='żółw'
+    monkeypatch.setenv('ADMIN_TOKEN',secret)
+    monkeypatch.setattr(diagnostic.sys,'stdin',io.StringIO(secret+'\n'))
+    monkeypatch.setattr(diagnostic.sys,'argv',['diagnose_local.py','market',source])
+    calls=[]
+    def forbidden(*args,**kwargs):
+        calls.append(1)
+        raise AssertionError('No request permitted')
+    monkeypatch.setattr(diagnostic,'request',forbidden)
+    assert diagnostic.main()==78 and calls==[]
+    captured=capsys.readouterr()
+    assert json.loads(captured.out)=={'status':'BLOCKED','code':'INVALID_ACCESS_TOKEN'}
+    assert secret not in captured.out+captured.err and captured.err==''

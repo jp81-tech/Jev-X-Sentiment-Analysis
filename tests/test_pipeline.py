@@ -20,7 +20,7 @@ def market(price=100, tick=.001):
             "fetched_at": now, "request_started_at": now, "freshness_basis": "source_timestamp", "source_timestamp": now, "valid_until": now+120, "price": price, "tick_size": tick, "rsi_14": 50, "change_24h_pct": 0}
 
 def social():
-    return {"status": "ok", "source": "twitterapi.io", "fetched_at": time.time(), "valid_until": time.time()+600, "tweets": [{"id": str(i), "text": "buy!", "source":"twitterapi.io"} for i in range(50)], "target_count": 50}
+    return {"status": "ok", "source": "twitterapi.io", "fetched_at": time.time(), "valid_until": time.time()+600, "tweets": [{"id": str(i), "text": "buy!", "source":"twitterapi.io", "timestamp_epoch": time.time()-1} for i in range(50)], "target_count": 50, "publication_max_age_seconds":86400}
 
 def answers(probs=True):
     return NS(answers={"trade_action": NS(choice="BUY", confidence=.42, probabilities=dict(zip(ACTIONS, [0,.61,.35,0,.04,0])) if probs else {}),
@@ -138,7 +138,7 @@ async def test_market_failures_no_decision(exchange, model, monkeypatch, failure
     async def fetch(*a,**k): return social()
     monkeypatch.setattr(api.twitter_service,"fetch_tweets",fetch)
     monkeypatch.setattr(api.typesafe_service,"api_key","synthetic")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://127.0.0.1") as client:
         result = (await client.post("/api/v1/analyze",json={"symbol":"BTC","sample_size":50})).json()
     assert result["decision"] is None and result["status"] != "success" and model.calls == 0
     assert result["market"]["price"] is None
@@ -158,7 +158,7 @@ async def test_settings_invalid_and_write_failure(monkeypatch,tmp_path):
     config = Path(os.environ["JEV_CONFIG_FILE"])
     config.write_text("# retained\nUNRELATED=value\n")
     old = config.read_bytes()
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://127.0.0.1") as client:
         response = await client.post("/api/v1/settings", json={"typesafe_api_key":"synthetic123", "twitter_api_key":"bad key"})
         assert response.status_code == 400
         assert api.typesafe_service.api_key is None and config.read_bytes() == old
@@ -170,7 +170,7 @@ async def test_settings_invalid_and_write_failure(monkeypatch,tmp_path):
 
 @pytest.mark.asyncio
 async def test_settings_concurrent_atomic():
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://127.0.0.1") as client:
         results = await asyncio.gather(*[client.post("/api/v1/settings",json={"typesafe_api_key":f"synthetic{i}","twitter_api_key":f"twitterkey{i}"}) for i in range(5)])
     assert all(r.status_code == 200 for r in results)
     config = Path(os.environ["JEV_CONFIG_FILE"])
@@ -188,7 +188,7 @@ async def test_success_endpoint(model,monkeypatch):
     monkeypatch.setattr(api.twitter_service,"fetch_tweets",fetch)
     monkeypatch.setattr(api.market_service,"get_market_data",get)
     monkeypatch.setattr(api.typesafe_service,"api_key","synthetic")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://127.0.0.1") as client:
         res = await client.post("/api/v1/analyze",json={"symbol":"BTC","sample_size":50})
         assert res.status_code == 200 and res.json()["decision"]["confidence_pct"] == 42
         assert (await client.post("/api/v1/analyze",json={"symbol":"BTC;","sample_size":50})).status_code == 400
@@ -209,7 +209,7 @@ def test_ui_node():
     import subprocess
     result = subprocess.run(["node", "tests/test_ui.js"],capture_output=True,text=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "27 UI checks passed" in result.stdout
+    assert "37 UI checks passed" in result.stdout
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("price", [0, float("nan"), float("inf")])
@@ -322,7 +322,7 @@ async def test_settings_failure_removes_temporary(monkeypatch,stage):
         api.atomic_write_settings(config,"SYNTHETIC_KEY=synthetic123")
     assert exc.value is failure
     assert not list(config.parent.glob(".settings-*"))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://127.0.0.1") as client:
         response = await client.post("/api/v1/settings",json={"typesafe_api_key":"synthetic123","twitter_api_key":"synthetic456"})
     assert response.status_code == 500
     assert config.read_bytes() == before

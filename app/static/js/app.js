@@ -1,12 +1,16 @@
 // Jev X Sentiment Analysis Terminal Client Controller
 
 let currentDecision = null;
+let accessToken = "";
+const apiHeaders = () => ({ "Content-Type": "application/json", ...(accessToken ? { "X-Admin-Token": accessToken } : {}) });
+const formatMetric = (value, digits = 1) => typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "—";
 let currentMarketPair = null;
 let requestGeneration = 0;
 let requestFetchId = 0;
 let decisionExpiresAt = 0;
 let expiryTimer = null;
-const formatPrice = value => Number(value).toLocaleString(undefined, { maximumSignificantDigits: 15 });
+const formatSigned = value => typeof value === "number" && Number.isFinite(value) ? `${value > 0 ? "+" : ""}${value.toFixed(2)}` : "—";
+const formatPrice = value => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString(undefined, { maximumSignificantDigits: 15 }) : "—";
 // Set from the last response's market block: true when Kraken failed and the
 // prices in it are placeholder constants rather than quotes.
 let currentPriceIsFallback = false;
@@ -34,6 +38,9 @@ function setupEventListeners() {
     const copyBtn = document.getElementById("copy-levels-btn");
 
     symbolInput.addEventListener("input", () => { ++requestGeneration; invalidateDecision("Asset changed — analyze again"); });
+
+    const tokenInput = document.getElementById("access-token-input");
+    if (tokenInput) tokenInput.addEventListener("input", () => { accessToken = tokenInput.value; });
 
     // Slider change
     slider.addEventListener("input", (e) => {
@@ -85,12 +92,12 @@ function setupEventListeners() {
         const text = [
             `--- JEV X SENTIMENT ANALYSIS TRADE TICKET ---`,
             `Asset: ${currentMarketPair}`,
-            `Action: ${d.action} (${d.confidence_pct}% Confidence)`,
+            `Action: ${d.action} (${formatMetric(d.confidence_pct)}% Confidence)`,
             `Entry Range: $${formatPrice(lvls.entry_range[0])} - $${formatPrice(lvls.entry_range[1])}`,
-            `Stop Loss: $${formatPrice(lvls.stop_loss)} (${lvls.stop_loss_pct}%)`,
-            `Target 1: $${formatPrice(lvls.target_1)} (${lvls.target_1_pct > 0 ? '+' : ''}${lvls.target_1_pct}%)`,
-            `Target 2: $${formatPrice(lvls.target_2)} (${lvls.target_2_pct > 0 ? '+' : ''}${lvls.target_2_pct}%)`,
-            `Risk/Reward: ${lvls.risk_reward_ratio} R:R`,
+            `Stop Loss: $${formatPrice(lvls.stop_loss)} (${formatMetric(lvls.stop_loss_pct, 2)}%)`,
+            `Target 1: $${formatPrice(lvls.target_1)} (${formatSigned(lvls.target_1_pct)}%)`,
+            `Target 2: $${formatPrice(lvls.target_2)} (${formatSigned(lvls.target_2_pct)}%)`,
+            `Risk/Reward: ${formatMetric(lvls.risk_reward_ratio, 2)} R:R`,
             `Rationale: ${d.rationale}`
         ].join("\n");
 
@@ -137,7 +144,7 @@ function setupEventListeners() {
             try {
                 const res = await fetch("/api/v1/settings", {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers: apiHeaders(),
                     body: JSON.stringify({
                         typesafe_api_key: typesafeKey || null,
                         twitter_api_key: twitterKey || null
@@ -190,7 +197,7 @@ async function runAnalysis(symbol, sampleSize) {
     try {
         const response = await fetch("/api/v1/analyze", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: apiHeaders(),
             body: JSON.stringify({ symbol: sym, sample_size: sampleSize }),
         });
 
@@ -313,7 +320,7 @@ function updateUI(data) {
         badge.classList.add("badge-hold");
     }
 
-    document.getElementById("confidence-val").textContent = `${decision.confidence_pct || 0}%`;
+    document.getElementById("confidence-val").textContent = `${formatMetric(decision.confidence_pct)}%`;
     document.getElementById("rationale-box").textContent = decision.rationale || "No rationale available.";
 
     // Render 6-way Signal Probability Distribution
@@ -336,18 +343,18 @@ function updateUI(data) {
         const lvls = decision.trade_levels || {};
         const entry = lvls.entry_range || [market.price, market.price];
         document.getElementById("lvl-entry").textContent = `$${formatPrice(entry[0])} - $${formatPrice(entry[1])}`;
-        document.getElementById("lvl-sl").textContent = `$${formatPrice(lvls.stop_loss)} (${lvls.stop_loss_pct || 0}%)`;
-        document.getElementById("lvl-tp1").textContent = `$${formatPrice(lvls.target_1)} (+${lvls.target_1_pct || 0}%)`;
-        document.getElementById("lvl-tp2").textContent = `$${formatPrice(lvls.target_2)} (+${lvls.target_2_pct || 0}%)`;
-        document.getElementById("lvl-rr").textContent = `${lvls.risk_reward_ratio || 2.0}:1 Expected R:R`;
+        document.getElementById("lvl-sl").textContent = `$${formatPrice(lvls.stop_loss)} (${formatMetric(lvls.stop_loss_pct, 2)}%)`;
+        document.getElementById("lvl-tp1").textContent = `$${formatPrice(lvls.target_1)} (${formatSigned(lvls.target_1_pct)}%)`;
+        document.getElementById("lvl-tp2").textContent = `$${formatPrice(lvls.target_2)} (${formatSigned(lvls.target_2_pct)}%)`;
+        document.getElementById("lvl-rr").textContent = `${formatMetric(lvls.risk_reward_ratio, 2)}:1 Expected R:R`;
     }
 
     // 4. Metrics Radar
     document.getElementById("sentiment-label-val").textContent = stats.sentiment_label || decision.sentiment_label || "Neutral";
-    document.getElementById("sentiment-sub").textContent = `Polarity Score: ${stats.polarity_score || 0} across ${stats.sample_size} tweets`;
-    document.getElementById("squeeze-val").textContent = `${decision.squeeze_risk_pct || 0}%`;
-    document.getElementById("diversity-val").textContent = `${stats.author_diversity_pct || 0}%`;
-    document.getElementById("catalyst-val").textContent = `${decision.catalyst_impact_score || 0} / 3.0`;
+    document.getElementById("sentiment-sub").textContent = `Polarity Score: ${formatMetric(stats.polarity_score)} across ${stats.sample_size} tweets`;
+    document.getElementById("squeeze-val").textContent = `${formatMetric(decision.squeeze_risk_pct)}%`;
+    document.getElementById("diversity-val").textContent = `${formatMetric(stats.author_diversity_pct)}%`;
+    document.getElementById("catalyst-val").textContent = `${formatMetric(decision.catalyst_impact_score)} / 3.0`;
 
     // 5. Update Exchange Links
     const row = document.getElementById("exchange-links-row");
@@ -430,10 +437,10 @@ function renderProbabilityDistribution(decision) {
     const calculatedSum = items.reduce((acc, it) => acc + it.pct, 0).toFixed(1);
     const winnerItem = items.find((it) => it.isWinner) || items[0];
     const runnerUp = items.find((it) => !it.isWinner) || { action: "HOLD", pct: 0 };
-    const margin = (winnerItem.pct - runnerUp.pct).toFixed(1);
+    const margin = winnerItem.pct - runnerUp.pct;
 
     if (winnerNote) {
-        winnerNote.innerHTML = `Selected: <span class="highlight-action">${winnerAction}</span> (${winnerItem.pct}%) · Total: ${calculatedSum}%`;
+        winnerNote.innerHTML = `Selected: <span class="highlight-action">${winnerAction}</span> (${formatMetric(winnerItem.pct)}%) · Total: ${calculatedSum}%`;
     }
 
     if (confSub) {
@@ -483,7 +490,7 @@ function renderProbabilityDistribution(decision) {
             </div>
             <div class="dist-footer-item">
                 <span class="footer-label">Selection Logic:</span>
-                <span class="footer-val font-mono" style="color: var(--text-secondary);">${winnerAction} selected; difference (+${margin}% over runner-up ${runnerUp.action})</span>
+                <span class="footer-val font-mono" style="color: var(--text-secondary);">${winnerAction} selected; difference (${formatSigned(margin)}% over runner-up ${runnerUp.action})</span>
             </div>
         `;
     }

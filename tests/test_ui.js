@@ -18,13 +18,13 @@ const now = Date.now()/1000;
 const data = {symbol:'BTC',status:'success',model_status:'ok',market:{status:'ok',price:.00001,rsi_14:0,request_started_at:now,freshness_basis:"source_timestamp",fetched_at:now,source_timestamp:now,valid_until:now+120},social:{status:'ok',fetched_at:now,valid_until:now+600,target_count:50},social_stats:{sample_size:50},decision:{action:'BUY',confidence_pct:42,trade_levels:{entry_range:[.00000995,.00001002],stop_loss:.00000962,target_1:.00001045,target_2:.00001085},action_probabilities:{STRONG_BUY:0,BUY:61,HOLD:35,TAKE_PROFIT:0,SELL:4,STRONG_SELL:0}}};
 context.data = data;
 const render = ()=> vm.runInContext('updateUI(data)',context);
-function valid(){context.data=structuredClone(data);render();assert.equal(element('copy-levels-btn').disabled,false);assert.equal(element('confidence-val').textContent,'42%');assert(element('lvl-entry').textContent.includes('0.00000995'));assert.equal(element('ticker-rsi').textContent,0);}
+function valid(){context.data=structuredClone(data);render();assert.equal(element('copy-levels-btn').disabled,false);assert.equal(element('confidence-val').textContent,'42.0%');assert(element('lvl-entry').textContent.includes('0.00000995'));assert.equal(element('ticker-rsi').textContent,0);}
 function invalid(){assert.equal(element('copy-levels-btn').disabled,true);assert.equal(element('lvl-entry').textContent,'—');assert.equal(element('confidence-val').textContent,'—');assert.equal(vm.runInContext('currentDecision',context),null);}
 let checks=0;
 for (const mutate of [d=>{d.decision.is_mock=true;},d=>{d.market.is_fallback=true;},d=>{d.market.valid_until=1;},d=>{d.decision=null;d.status='unavailable';},d=>{d.social.status='partial';},d=>{d.is_twitter_mock=true;},d=>{d.market.source_timestamp=now-121;},d=>{d.social.valid_until=now-1;}]) {valid();mutate(context.data);render();invalid();checks++;}
 valid();context.data.market.source_timestamp=null;context.data.market.freshness_basis="request_start";render();assert.equal(element('copy-levels-btn').disabled,false);checks++;
 context.data.market.request_started_at=now-121;render();invalid();checks++;
-valid();context.data.decision.action_probabilities=null;render();assert.equal(element('dist-bars-container').textContent,'Distribution unavailable');assert.equal(element('confidence-val').textContent,'42%');checks++;
+valid();context.data.decision.action_probabilities=null;render();assert.equal(element('dist-bars-container').textContent,'Distribution unavailable');assert.equal(element('confidence-val').textContent,'42.0%');checks++;
 for (const value of [null, NaN, Infinity, undefined]) {
     valid();context.data.market.change_24h_pct=value;context.data.market.volume_24h_usd=value;render();
     assert.equal(element('ticker-change').textContent,'—');assert.equal(element('ticker-vol').textContent,'—');checks++;
@@ -127,6 +127,32 @@ async function main() {
     element('copy-levels-btn').listeners.click();
     assert.equal(copied.length,copiedBefore);
     assert.equal(element('ticker-symbol').textContent,'—');checks++;
+    valid();context.data.decision.confidence_pct=42.123456;context.data.decision.trade_levels.risk_reward_ratio=2.3333333;render();
+    assert.equal(element('confidence-val').textContent,'42.1%');
+    assert.equal(element('lvl-rr').textContent,'2.33:1 Expected R:R');
+    element('copy-levels-btn').listeners.click();assert(copied.at(-1).includes('Risk/Reward: 2.33 R:R'));
+    context.data.decision.trade_levels.risk_reward_ratio=NaN;render();assert(element('lvl-rr').textContent.startsWith('—'));
+    assert.equal(vm.runInContext('formatPrice(null)',context),'—');checks++;
+    element('access-token-input').value='synthetic-ui-token';element('access-token-input').listeners.input();
+    assert.equal(vm.runInContext('apiHeaders()["X-Admin-Token"]',context),'synthetic-ui-token');
+    let sentHeaders;
+    context.fetch=async(url,options)=>{sentHeaders=options.headers;throw Error('synthetic offline failure');};
+    await vm.runInContext('runAnalysis("BTC",50)',context);
+    assert.equal(sentHeaders['X-Admin-Token'],'synthetic-ui-token');
+    element('access-token-input').value='';element('access-token-input').listeners.input();
+    assert.equal(vm.runInContext('apiHeaders()["X-Admin-Token"]',context),undefined);
+    await vm.runInContext('runAnalysis("BTC",50)',context);assert.equal(sentHeaders['X-Admin-Token'],undefined);checks++;
+    for (const [value,expected] of [[-4.5,'-4.50'],[4.5,'+4.50'],[0,'0.00'],[NaN,'—'],[null,'—']]) {
+        valid();context.data.decision.action='SELL';context.data.decision.trade_levels.target_1_pct=value;context.data.decision.trade_levels.target_2_pct=value;render();
+        assert(element('lvl-tp1').textContent.includes(`(${expected}%)`));
+        element('copy-levels-btn').listeners.click();assert(copied.at(-1).includes(`(${expected}%)`));
+        assert(!copied.at(-1).includes('+-'));checks++;
+    }
+    for (const [buy,hold,expected] of [[60,40,'+20.00'],[40,60,'-20.00'],[50,50,'0.00']]) {
+        valid();context.data.decision.action_probabilities={STRONG_BUY:0,BUY:buy,HOLD:hold,TAKE_PROFIT:0,SELL:0,STRONG_SELL:0};render();
+        const footer=element('dist-footer').innerHTML;
+        assert(footer.includes(`difference (${expected}%`));assert(!footer.includes('+-'));checks++;
+    }
     const source=fs.readFileSync('app/static/js/app.js','utf8');
     checks += await checkRaces(source);
     // Red control: restore the former unconditional finally only in memory.

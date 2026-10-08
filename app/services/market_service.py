@@ -137,7 +137,7 @@ class MarketService:
                 open_interest_usd = round(converted_oi, 2) if converted_oi is not None else None
                 has_perpetuals = funding_rate_pct is not None
             except Exception as fe:
-                logger.info(f"Kraken Futures perpetual contract unavailable for {sym}: {fe}")
+                logger.info("Kraken Futures perpetual contract unavailable")
 
             # 4. Explicitly labeled 24h momentum bucket
             result = {

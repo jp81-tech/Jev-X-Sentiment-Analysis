@@ -18,7 +18,7 @@ async def test_bad_spot_metadata_blocks_asgi_model(exchange, model, monkeypatch,
     monkeypatch.setattr(exchange, "fetch_ticker", ticker)
     monkeypatch.setattr(api.twitter_service, "fetch_tweets", fetch)
     monkeypatch.setattr(api.typesafe_service, "api_key", "synthetic")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         response = await client.post("/api/v1/analyze", json={"symbol": "BTC", "sample_size": 50})
     assert response.status_code == 200
     result = response.json()

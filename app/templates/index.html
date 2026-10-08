@@ -28,6 +28,10 @@
             </div>
 
             <div class="nav-status">
+                <div class="access-control">
+                    <label for="access-token-input">Access token · this page only</label>
+                    <input id="access-token-input" type="password" autocomplete="off" placeholder="If required by server">
+                </div>
                 <div class="status-pill {% if has_typesafe_key %}status-active{% else %}status-warning{% endif %}"
                     id="typesafe-status">
                     <span class="status-dot"></span>
@@ -274,7 +278,7 @@
                         <div class="metric-row">
                             <div class="metric-info">
                                 <span class="metric-name">Author Diversity Ratio</span>
-                                <span class="metric-sub">Organic retail vs bot farms</span>
+                                <span class="metric-sub">Unique author names / sampled posts</span>
                             </div>
                             <span class="metric-value font-mono" id="diversity-val">--%</span>
                         </div>

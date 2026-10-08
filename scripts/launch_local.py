@@ -18,12 +18,15 @@ def main():
     except Exception:
         print('BLOCKED: RUNTIME_OR_CONFIG_INVALID; check installed requirements and configuration.', file=sys.stderr)
         return 78
+    # Exact origins for this socket, set before app/CORS construction.
+    settings.ALLOWED_ORIGINS = f"http://127.0.0.1:{args.port},http://localhost:{args.port}"
+    settings.ALLOWED_HOSTS = "127.0.0.1,localhost"
     missing = [name for name, value in [('TWITTER_KEY_MISSING', settings.TWITTER_API_KEY),
                                         ('TYPESAFE_KEY_MISSING', settings.TYPESAFE_API_KEY)] if not value or not value.strip()]
     print(json.dumps({'startup': 'LOCAL_UI', 'host': '127.0.0.1', 'port': args.port,
                       'workers': 1, 'full_analysis': 'BLOCKED' if missing else 'CONFIGURED_NOT_VERIFIED',
                       'codes': missing}), flush=True)
-    uvicorn.run('app.main:app', host='127.0.0.1', port=args.port, workers=1, access_log=False)
+    uvicorn.run('app.main:app', host='127.0.0.1', port=args.port, workers=1, access_log=False, proxy_headers=False)
     return 0
 
 

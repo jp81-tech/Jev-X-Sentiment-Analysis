@@ -6,7 +6,7 @@ from app.services import twitter_service as module
 
 
 def page(start, count, cursor=None):
-    return {'tweets': [{'id': str(i), 'text': 'synthetic'} for i in range(start, start+count)],
+    return {'tweets': [{'id': str(i), 'text': 'synthetic', 'createdAt': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()} for i in range(start, start+count)],
             'has_next_page': cursor is not None, 'next_cursor': cursor}
 
 

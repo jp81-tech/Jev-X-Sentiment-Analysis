@@ -22,12 +22,12 @@ User Search (e.g. "SOL", 500 tweets)
             │
             ▼
    Tier 1: Python Statistical Pre-Processing
-   - Computes total engagement velocity (likes, retweets per minute)
-   - Measures author diversity ratio (detects bot farms vs organic retail)
+   - Computes mean weighted engagement per post: (likes + 2 × retweets) / sampled posts
+   - Measures unique author-name ratio; this is not bot detection
    - Computes keyword sentiment polarity (fear/capitulation vs greed/hype)
    - Stratified extraction:
        • Top 25 highest-engaged tweets (KOL & market-moving opinions)
-       • 25 most recent breaking tweets (current real-time narrative)
+       • 25 first returned valid posts from the configured publication window
             │
             ▼
    Tier 2: Source-aware storage and pagination
@@ -66,7 +66,7 @@ You can configure the tweet sample size in the terminal interface based on your 
 | **500 Tweets** | ~$0.0750 | ~$0.0008 | **~$0.076 (7.6¢)** | Comprehensive sentiment & news audit |
 | **1,000 Tweets** | ~$0.1500 | ~$0.0008 | **~$0.151 (15¢)** | Major regime shift or ETF/catalyst investigation |
 
-*Cost figures above are estimates, not measured bills. A complete social sample is cached for the configured TTL; market and model calls are separate and may still incur costs. Pagination overlap can increase provider billing.*
+*Cost figures above are estimates, not measured bills. A complete social sample is cached for the configured TTL; market and model calls are separate and may still incur costs. Pagination overlap can increase provider billing. Retries add requests; billing of HTTP 429 responses is unverified, as is billing of other failed requests. This table is not a cap on actual charges.*
 
 ---
 
@@ -141,12 +141,12 @@ ALLOWED_ORIGINS=http://localhost:8000,http://127.0.0.1:8000
 ### 3. Run the Application
 
 ```bash
-uvicorn app.main:app --reload --port 8000
+sh scripts/launch_local.sh --port 8787
 ```
 
 Open your browser and navigate to:
 ```text
-http://localhost:8000
+http://127.0.0.1:8787
 ```
 
 ### 4. Running the Automated Test Suite
@@ -177,7 +177,7 @@ Ticker request start, receipt time, and source timestamp are preserved separatel
 1. **Enter a Symbol**: Type any supported cryptocurrency symbol (e.g. `BTC`, `SOL`, `ETH`).
 2. **Select Sample Size**: Choose between 50, 100, 250, 500, or 1,000 tweets using the sample slider.
 3. **Review Market & Derivatives Data**: View live spot price, 24-hour volume, perpetuals funding rate, and open interest delta (powered by Kraken & Kraken Futures).
-4. **Inspect Social Sentiment**: Check engagement velocity, fear/greed polarity, and top-discussed catalysts across the sample.
+4. **Inspect Social Sentiment**: Check mean engagement per post, fear/greed polarity, and top-discussed catalysts across the sample.
 5. **Read the Jev System One Decision**: Review the recommended action (`STRONG BUY`, `BUY`, `HOLD`, `TAKE PROFIT`, `SELL`), confidence percentage, and rationale.
 6. **Execute Manually**: Review the calculated entry, stop-loss, and target levels and execute manually on your preferred exchange or DEX.
 
@@ -189,7 +189,7 @@ Ticker request start, receipt time, and source timestamp are preserved separatel
 
 ---
 
-Twitter ingestion retries HTTP 429 on the same cursor up to four total attempts per page. Valid Retry-After delta-seconds or HTTP dates are respected; absent/malformed values use 5/10/20-second backoff. Overlapping searches using the same credential share an in-process request lock and cooldown. The provider-fetch budget is 75 seconds, including waiting and requests; a required delay beyond that budget stops without an early retry.
+Twitter ingestion retries HTTP 429 on the same cursor up to four total attempts per page. Valid Retry-After delta-seconds or HTTP dates are respected; absent/malformed values use 5/10/20-second backoff. Sequential and overlapping searches using the same credential share an in-process request lock and cooldown. The provider-fetch budget is 75 seconds, including waiting and requests; a required delay beyond that budget stops without an early retry.
 
 Persistent HTTP 429 reports `rate_limited`, while cooldown exhaustion reports `rate_limit_timeout`. Provider-fetch deadline expiry without an active cooldown reports `fetch_timeout`; HTTP client exceptions, including read timeouts, report `provider_error`. Other 4xx responses are not retried. Page-call counts include retries. Exhausted searches return partial/unavailable data and cannot produce a model decision from an incomplete sample. Freshness starts at the original fetch start and is not renewed by retries. This coordination is within one worker/process and does not cover other applications using the same key.
 
@@ -209,3 +209,23 @@ The market mode requests BTC public market data. Analysis mode checks credential
 ## License
 
 This project is open-source software licensed under the [MIT License](LICENSE).
+
+
+### Local access and publication window (08 October 2026)
+
+The launcher explicitly binds 127.0.0.1, one worker, with forwarded-header interpretation disabled. `HOST` in the configuration is descriptive; it does not override this launcher or a manually invoked uvicorn command. Prefer the launcher: it configures exact local Origins for the chosen `--port` before importing the app. For direct uvicorn use `uvicorn app.main:app --host 127.0.0.1 --port 8787 --no-proxy-headers` and explicitly configure matching ALLOWED_ORIGINS/ALLOWED_HOSTS. No public deployment is included.
+
+Every analysis, market and settings API request uses the same access policy. If `ADMIN_TOKEN` is configured, it is required even on loopback, in `X-Admin-Token` (constant-time comparison). Enter it in the UI access-token field; it stays only in page memory, with no localStorage/sessionStorage or cookies, and is lost on reload. Clearing the field removes it from future requests. API keys remain separate server configuration.
+
+Without a token, only a numeric loopback client with no Forwarded/X-Forwarded-*/X-Real-IP headers is accepted. `localhost` and `testclient` are not trusted client addresses. Host must match `ALLOWED_HOSTS` (default localhost,127.0.0.1,::1); Origin, when present, must match `ALLOWED_ORIGINS`. CORS is not authentication. A proxy hiding all forwarding evidence is indistinguishable from a direct local client: **every proxy requires ADMIN_TOKEN**, even if the backend is loopback. Explicitly configure its Host/Origin allowlists and protect its transport; the app does not claim to detect such a hidden proxy.
+
+`SOCIAL_WINDOW_HOURS` defaults to 24, configurable from 1 to 168. Search includes explicit since_time/until_time bounds; local checks reject unknown, naive, invalid, future and too-old publication dates. Missing dates remain unknown, never receive the fetch time. The response provides publication-window bounds, oldest/newest accepted publication time and rejection counts. Only the requested number of unique valid posts permits model evaluation. Publication age is checked again for cache reuse and after the model; the response deadline is at most the oldest post's publication time plus the window length. Thus cached/model results cannot extend a post's admissible lifetime. Fetch freshness and publication age are separate.
+
+Cooldown entries survive completed requests, are keyed by credential hashes, and expire when unused and past their deadlines. At the 256-entry capacity, a new key is refused (`rate_limit_capacity`) rather than evicting an active cooldown. This is in-process coordination only.
+
+`constraints-tested.txt` records the installed dedicated Python 3.12 environment used for offline tests. To reproduce in a separately prepared environment use `python -m pip install -r requirements.txt -c constraints-tested.txt`; this patch did not install or update packages. Constraints constrain dependency versions, not platform binaries. The probability/confidence fields come from the provider and are not evidence of calibration, profitability or a forward-tested strategy. Decision-history logging and investment evaluation remain separate work.
+
+
+The launcher narrows ALLOWED_HOSTS to 127.0.0.1/localhost and ALLOWED_ORIGINS to those two HTTP origins with the selected port. It changes only runtime settings, not configuration files. For authenticated diagnostics, use `python scripts/diagnose_local.py market --token-env` to read an already-exported ADMIN_TOKEN from the process environment, or `--token-stdin` to read one line from stdin. No token values are accepted as command arguments; no .env is read by diagnostics. A missing/incorrect token produces BLOCKED/ACCESS_DENIED on HTTP401/403. Do not put secrets in shell history; use your secure input mechanism. Neither option persists or reports the token.
+
+Future publications remain rejected, including clock-skewed provider dates; this is deliberate, so keep the local clock accurate. Failure responses carry an X-Correlation-ID generated locally; logs retain only a closed category and stage with that ID, never raw exceptions.

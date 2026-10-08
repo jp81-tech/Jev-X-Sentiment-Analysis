@@ -55,6 +55,7 @@ def isolation(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "TYPESAFE_API_KEY", None)
     monkeypatch.setattr(twitter_module.twitter_service, "api_key", None)
     monkeypatch.setattr(typesafe_service, "api_key", None)
+    twitter_module._request_gates.clear()
     social_cache._cache.clear()
     market_cache._cache.clear()
     monkeypatch.setattr(socket.socket, "connect", denied)

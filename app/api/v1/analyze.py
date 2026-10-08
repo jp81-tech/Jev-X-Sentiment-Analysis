@@ -1,7 +1,9 @@
-from fastapi import APIRouter, HTTPException, Request, Header
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 import logging
+import uuid
+import httpx
 import asyncio
 import re
 import os
@@ -9,8 +11,9 @@ import time
 import tempfile
 from pathlib import Path
 
+from app.core.access import require_access
 from app.core.config import settings, CONFIG_PATH
-from app.core.freshness import market_is_fresh, within_validity
+from app.core.freshness import market_is_fresh, within_validity, social_is_fresh
 from app.core.market_validation import market_numbers_valid
 from app.services.market_service import market_service
 from app.services.twitter_service import twitter_service
@@ -19,7 +22,15 @@ from app.services.typesafe_service import typesafe_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["Analysis"])
+router = APIRouter(prefix="/v1", tags=["Analysis"], dependencies=[Depends(require_access)])
+
+def safe_failure(error, stage):
+    correlation = uuid.uuid4().hex
+    # Closed categories, never an attacker-controlled class name or exception text.
+    category = "timeout" if isinstance(error, (TimeoutError, httpx.TimeoutException)) else "invalid_data" if isinstance(error, (ValueError, TypeError)) else "internal"
+    logger.error("stage=%s category=%s correlation_id=%s", stage, category, correlation)
+    return HTTPException(500, detail="Service unavailable", headers={"X-Correlation-ID": correlation})
+
 
 KEY_REGEX = re.compile(r"^[A-Za-z0-9_\-\.]{8,128}$")
 settings_lock = asyncio.Lock()
@@ -71,12 +82,12 @@ async def analyze_asset(req: AnalyzeRequest) -> Dict[str, Any]:
                         and len(tweets) == sample_size
                         and len({t.get("id") for t in tweets}) == sample_size
                         and all(t.get("id") and t.get("source") == "twitterapi.io" for t in tweets)
-                        and within_validity(twitter_res))
+                        and social_is_fresh(twitter_res))
         social_stats.update({"fetched_at": twitter_res.get("fetched_at"), "valid_until": twitter_res.get("valid_until")})
         if fresh_market and fresh_social:
             decision = await typesafe_service.evaluate_decision(symbol=sym, market_data=market_data, social_stats=social_stats)
         # Check again after the awaited model; both inputs may have expired.
-        if not market_is_fresh(market_data) or not within_validity(twitter_res):
+        if not market_is_fresh(market_data) or not social_is_fresh(twitter_res):
             decision = None
         status = "success" if decision else ("degraded" if tweets else "unavailable")
 
@@ -96,8 +107,7 @@ async def analyze_asset(req: AnalyzeRequest) -> Dict[str, Any]:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error analyzing {sym}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to analyze {sym}: {str(e)}")
+        raise safe_failure(e, "analysis") from None
 
 
 @router.get("/market/{symbol}")
@@ -109,7 +119,7 @@ async def get_market_summary(symbol: str) -> Dict[str, Any]:
     try:
         return await market_service.get_market_data(sym)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise safe_failure(e, "market") from None
 
 
 class SettingsUpdate(BaseModel):
@@ -126,25 +136,8 @@ async def get_settings_status() -> Dict[str, Any]:
 
 
 @router.post("/settings")
-async def update_settings(
-    payload: SettingsUpdate,
-    request: Request,
-    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token")
-) -> Dict[str, Any]:
-    """
-    Update API keys with authentication and input sanitization.
-    Permits access from localhost or with a valid X-Admin-Token header.
-    """
-    client_host = request.client.host if request.client else "unknown"
-    is_local = client_host in ("127.0.0.1", "::1", "localhost", "testclient")
-    has_valid_admin_token = bool(settings.ADMIN_TOKEN and x_admin_token == settings.ADMIN_TOKEN)
-
-    if not (is_local or has_valid_admin_token):
-        raise HTTPException(
-            status_code=403,
-            detail="Forbidden: Settings modification is restricted to localhost or authenticated requests."
-        )
-
+async def update_settings(payload: SettingsUpdate) -> Dict[str, Any]:
+    """Update keys after the router's common access policy has authorized the request."""
     updates = {}
     for field, key in (("typesafe_api_key", "TYPESAFE_API_KEY"), ("twitter_api_key", "TWITTER_API_KEY")):
         value = getattr(payload, field)

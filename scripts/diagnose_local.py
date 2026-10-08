@@ -5,6 +5,7 @@ import argparse
 import importlib.metadata
 import json
 import math
+import os
 import platform
 import socket
 import sys
@@ -84,11 +85,11 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def request(port, path, body=None):
+def request(port, path, body=None, token=None):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     req = urllib.request.Request(f'http://127.0.0.1:{port}{path}',
                                  data=json.dumps(body).encode() if body is not None else None,
-                                 headers={'Content-Type': 'application/json'})
+                                 headers={'Content-Type': 'application/json', **({'X-Admin-Token':token} if token else {})})
     started = time.monotonic()
     try:
         with opener.open(req, timeout=150) as response:
@@ -99,7 +100,7 @@ def request(port, path, body=None):
             return data, {'status': 'REPLIED', 'http_code': response.status,
                           'elapsed_seconds': round(time.monotonic() - started, 3)}
     except urllib.error.HTTPError as error:
-        code, http_code = 'HTTP_ERROR', error.code
+        code, http_code = ('ACCESS_DENIED' if error.code in (401,403) else 'HTTP_ERROR'), error.code
     except (TimeoutError, socket.timeout):
         code, http_code = 'TIMEOUT', None
     except urllib.error.URLError:
@@ -113,6 +114,9 @@ def request(port, path, body=None):
 def probe(mode, port, requester=request, clock=time.time):
     health, api = requester(port, '/health')
     result = {'status': 'UNKNOWN', 'api': api, 'model_available': False}
+    if api.get('http_code') in (401,403):
+        result.update(status='BLOCKED', code='ACCESS_DENIED')
+        return result
     if not isinstance(health, dict) or health.get('status') != 'healthy':
         result['code'] = 'LOCAL_API_UNAVAILABLE'
         return result
@@ -125,6 +129,9 @@ def probe(mode, port, requester=request, clock=time.time):
     path = '/api/v1/market/BTC' if mode == 'market' else '/api/v1/analyze'
     body = None if mode == 'market' else {'symbol': 'BTC', 'sample_size': 50}
     payload, response = requester(port, path, body)
+    if response.get("http_code") in (401,403):
+        result.update(status="BLOCKED", code="ACCESS_DENIED", api=response)
+        return result
     try:
         result.update(classify(payload, mode, clock()), api=response)
     except Exception:
@@ -146,10 +153,22 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('mode', choices=['market', 'analysis'])
     parser.add_argument('--port', type=int, default=8787)
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument('--token-env', action='store_true', help='Read ADMIN_TOKEN from process environment only')
+    source.add_argument('--token-stdin', action='store_true', help='Read one token line from stdin; do not pass it in argv')
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error('port must be between 1 and 65535')
-    result = probe(args.mode, args.port)
+    token = os.environ.get("ADMIN_TOKEN", "") if args.token_env else sys.stdin.readline(4097).rstrip("\r\n") if args.token_stdin else ""
+    try:
+        token.encode("latin-1")
+        header_representable = True
+    except UnicodeEncodeError:
+        header_representable = False
+    if len(token) > 4096 or not header_representable or "\n" in token or "\r" in token:
+        print(json.dumps({"status":"BLOCKED", "code":"INVALID_ACCESS_TOKEN"}))
+        return 78
+    result = probe(args.mode, args.port, requester=lambda port,path,body=None: request(port,path,body,token=token))
     result['versions'] = versions()
     print(json.dumps(result, allow_nan=False))
     return 0 if result['status'] == 'LIVE_CHECK_OK' else 78

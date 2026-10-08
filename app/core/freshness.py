@@ -23,3 +23,14 @@ def market_is_fresh(data, now=None):
             and isinstance(source_at, (int, float)) and not isinstance(source_at, bool)
             and math.isfinite(source_at) and 0 <= now - source_at < 120
             and data["valid_until"] <= min(start, source_at) + 120)
+
+
+def social_is_fresh(data, now=None):
+    now = time.time() if now is None else now
+    age = data.get("publication_max_age_seconds")
+    tweets = data.get("tweets", [])
+    return (within_validity(data, now) and isinstance(age, (int, float))
+            and not isinstance(age, bool) and math.isfinite(age) and age > 0
+            and bool(tweets) and all(isinstance(t.get("timestamp_epoch"), (int, float))
+                and not isinstance(t["timestamp_epoch"], bool) and math.isfinite(t["timestamp_epoch"])
+                and 0 <= now - t["timestamp_epoch"] < age for t in tweets))
