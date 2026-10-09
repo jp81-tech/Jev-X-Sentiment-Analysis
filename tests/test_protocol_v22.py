@@ -74,13 +74,15 @@ def test_inputs_formatting_import_stability():
 
 
 def test_version_exclusions_and_old_settlement_not_reused(tmp_path):
-    valid=record();missing=record(2);missing.pop('inputs_version');other=record(3);other['inputs_version']='b'*64
+    valid=record();missing=record(2,t=record()['ts_utc']-15*86400);missing.pop('inputs_version');other=record(3,t=record()['ts_utc']-10*86400);other['inputs_version']='b'*64
     log=tmp_path/'log';write(log,[valid,missing,other]);cache_fixture(tmp_path/'cache',valid)
     out=tmp_path/'out';audit=tmp_path/'audit';now=valid['ts_utc']+144*r.HOUR
     result=settle.settle(log,tmp_path/'cache',out,audit,PROTOCOL,now=now)
     assert result['excluded_inputs_version']==2 and result['ok_new']==1
     answer=evaluate.evaluate(log,out,tmp_path/'cache',PROTOCOL,now,True)
     assert answer['excluded_inputs_version']==2 and answer['n']==1
+    # PV-D1: excluded records must not enter the cohort at all: t0 (days) and incomplete count come from the valid record only.
+    assert answer['days']==6 and answer['incomplete']==0 and answer['blocks']==1
     assert set(answer['placebo_tost'])=={'pre72','post72'}
     stale=r.jsonl(out);stale[0].pop('inputs_version');write(out,stale)
     answer=evaluate.evaluate(log,out,tmp_path/'cache',PROTOCOL,now,True)
@@ -108,7 +110,7 @@ def test_needed_small_gate_and_no_verdict_effect():
     result=r.needed_sample({'n':100,'g':10,'se':.003,'mean':.005},.003,.005)
     assert result['n_needed_edge_positive'] is None and result['n_needed_edge_positive_reason']=='mean_not_above_cost'
     baseline=r.evaluate_rows(rows,1000000,1000000+40*86400,r.PARAMS)
-    for i,x in enumerate(rows):x['alpha_beta_adj']=1000*i
+    for i,x in enumerate(rows):x['alpha_beta_adj']=(-1)**i*1000.0  # PV-D3: alternating sign, huge variance: any verdict derived from it would not be EDGE_POSITIVE
     after=r.evaluate_rows(rows,1000000,1000000+40*86400,r.PARAMS)
     assert baseline['verdict']==after['verdict']=='EDGE_POSITIVE'
     assert after['alpha_beta_adj']['n']==40 and after['alpha_beta_adj']['se']>0
