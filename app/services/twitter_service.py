@@ -26,6 +26,24 @@ _monotonic = time.monotonic
 _sleep = asyncio.sleep
 
 
+def _provider_count(data, primary, alternate):
+    value = data.get(primary)
+    if value is None:
+        value = data.get(alternate)
+    if value is None:
+        return 0
+    if type(value) not in (int, float, str) or isinstance(value, str) and not value.isdigit():
+        raise ValueError("Invalid count")
+    result = int(value)
+    if result < 0 or isinstance(value, float) and value != result:
+        raise ValueError("Invalid count")
+    return result
+
+
+class _MalformedResponse(Exception):
+    pass
+
+
 class _RateLimited(Exception):
     pass
 
@@ -169,40 +187,59 @@ class TwitterService:
                                 if attempt == PAGE_ATTEMPTS - 1:
                                     raise _RateLimited()
                             res.raise_for_status()
-                            data = res.json()
-                            raw = data.get("tweets") or data.get("data") or []
-                            if not isinstance(raw, list):
-                                raise ValueError("Invalid tweet collection")
-                            before = len(seen)
-                            for t in raw:
-                                tid = t.get("id")
-                                if not isinstance(tid, str) or not tid.strip() or tid in seen:
-                                    continue
-                                seen.add(tid)
-                                author = t.get("author") or {}
-                                created = t.get("createdAt") or t.get("created_at") or ""
-                                published = parse_twitter_timestamp(created)
-                                if published is None:
-                                    rejected["unknown_date"] += 1
-                                    continue
-                                if published > fetched_at:
-                                    rejected["future_date"] += 1
-                                    continue
-                                if published <= window_start:
-                                    rejected["outside_window"] += 1
-                                    continue
-                                tweets.append({
-                                    "id": tid, "text": t.get("text", ""), "source": "twitterapi.io",
-                                    "created_at": created, "timestamp_epoch": published,
-                                    "likes": int(t.get("likeCount") or t.get("likes") or 0),
-                                    "retweets": int(t.get("retweetCount") or t.get("retweets") or 0),
-                                    "replies": int(t.get("replyCount") or t.get("replies") or 0),
-                                    "author_username": author.get("userName") or author.get("username") or "anonymous",
-                                    "author_followers": int(author.get("followers") or author.get("followersCount") or 0),
-                                    "author_verified": bool(author.get("isBlueVerified") or author.get("verified"))
-                                })
-                                if len(tweets) == target_count:
-                                    break
+                            try:
+                                data = res.json()
+                                if not isinstance(data, dict):
+                                    raise ValueError("Invalid response schema")
+                                raw = data.get("tweets") if "tweets" in data else data.get("data")
+                                if not isinstance(raw, list):
+                                    raise ValueError("Invalid tweet collection")
+                                if "has_next_page" in data and type(data["has_next_page"]) is not bool:
+                                    raise ValueError("Invalid pagination flag")
+                                before = len(seen)
+                                for t in raw:
+                                    if not isinstance(t, dict):
+                                        raise ValueError("Invalid tweet schema")
+                                    tid = t.get("id")
+                                    if not isinstance(tid, str) or not tid.strip() or tid in seen:
+                                        continue
+                                    seen.add(tid)
+                                    author = t.get("author")
+                                    if author is None:
+                                        author = {}
+                                    if not isinstance(author, dict):
+                                        raise ValueError("Invalid author schema")
+                                    text = t.get("text", "")
+                                    if not isinstance(text, str):
+                                        raise ValueError("Invalid text schema")
+                                    for name in ("userName", "username"):
+                                        if author.get(name) is not None and not isinstance(author[name], str):
+                                            raise ValueError("Invalid username schema")
+                                    created = t.get("createdAt") or t.get("created_at") or ""
+                                    published = parse_twitter_timestamp(created)
+                                    if published is None:
+                                        rejected["unknown_date"] += 1
+                                        continue
+                                    if published > fetched_at:
+                                        rejected["future_date"] += 1
+                                        continue
+                                    if published <= window_start:
+                                        rejected["outside_window"] += 1
+                                        continue
+                                    tweets.append({
+                                        "id": tid, "text": text, "source": "twitterapi.io",
+                                        "created_at": created, "timestamp_epoch": published,
+                                        "likes": _provider_count(t, "likeCount", "likes"),
+                                        "retweets": _provider_count(t, "retweetCount", "retweets"),
+                                        "replies": _provider_count(t, "replyCount", "replies"),
+                                        "author_username": author.get("userName") or author.get("username") or "anonymous",
+                                        "author_followers": _provider_count(author, "followers", "followersCount"),
+                                        "author_verified": bool(author.get("isBlueVerified") or author.get("verified"))
+                                    })
+                                    if len(tweets) == target_count:
+                                        break
+                            except (ValueError, TypeError, OverflowError):
+                                raise _MalformedResponse() from None
                             if len(tweets) == target_count:
                                 reason = "target_reached"
                                 break
@@ -221,8 +258,29 @@ class TwitterService:
                         except (_RateLimitTimeout, TimeoutError):
                             reason = "rate_limit_timeout" if gate.not_before > _monotonic() else "fetch_timeout"
                             break
+                        except httpx.HTTPStatusError as error:
+                            code = error.response.status_code
+                            reason = "payment_required" if code == 402 else "http_error" if 400 <= code <= 599 else "provider_error"
+                            logger.warning("Twitter category=%s http_code=%s", reason, code)
+                            break
+                        except httpx.TimeoutException:
+                            reason = "fetch_timeout"
+                            logger.warning("Twitter category=fetch_timeout")
+                            break
+                        except httpx.DecodingError:
+                            reason = "malformed_response"
+                            logger.warning("Twitter category=malformed_response")
+                            break
+                        except httpx.RequestError:
+                            reason = "transport_error"
+                            logger.warning("Twitter category=transport_error")
+                            break
+                        except _MalformedResponse:
+                            reason = "malformed_response"
+                            logger.warning("Twitter category=malformed_response")
+                            break
                         except Exception:
-                            logger.warning("Twitter provider unavailable or returned malformed data")
+                            logger.warning("Twitter category=provider_error")
                             reason = "provider_error"
                             break
             finally:

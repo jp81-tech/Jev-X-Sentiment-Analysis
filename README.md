@@ -191,7 +191,7 @@ Ticker request start, receipt time, and source timestamp are preserved separatel
 
 Twitter ingestion retries HTTP 429 on the same cursor up to four total attempts per page. Valid Retry-After delta-seconds or HTTP dates are respected; absent/malformed values use 5/10/20-second backoff. Sequential and overlapping searches using the same credential share an in-process request lock and cooldown. The provider-fetch budget is 75 seconds, including waiting and requests; a required delay beyond that budget stops without an early retry.
 
-Persistent HTTP 429 reports `rate_limited`, while cooldown exhaustion reports `rate_limit_timeout`. Provider-fetch deadline expiry without an active cooldown reports `fetch_timeout`; HTTP client exceptions, including read timeouts, report `provider_error`. Other 4xx responses are not retried. Page-call counts include retries. Exhausted searches return partial/unavailable data and cannot produce a model decision from an incomplete sample. Freshness starts at the original fetch start and is not renewed by retries. This coordination is within one worker/process and does not cover other applications using the same key.
+Persistent HTTP 429 reports `rate_limited`, while cooldown exhaustion reports `rate_limit_timeout`. Provider-fetch deadline expiry without an active cooldown reports `fetch_timeout`; HTTP client timeouts also report `fetch_timeout`. HTTP 402 reports `payment_required`, other 4xx/5xx report `http_error`, malformed JSON/schema reports `malformed_response`, HTTP decoding errors report `malformed_response`, and other non-timeout httpx request errors (including too many redirects) report `transport_error`. Unclassified exceptions retain the neutral `provider_error` category. Other 4xx responses are not retried. Page-call counts include retries. Exhausted searches return partial/unavailable data and cannot produce a model decision from an incomplete sample. Freshness starts at the original fetch start and is not renewed by retries. This coordination is within one worker/process and does not cover other applications using the same key.
 
 ## Local launch and bounded diagnostics
 
@@ -264,3 +264,21 @@ A result records only allowlisted status/action/IDs, counts/times, HTTP code and
 The limit is a hard cap on locally reserved attempts using the same protected run-log, **not a guaranteed dollar cap**. Provider pages/retries and pricing can change costs. This patch does not install launchd, activate scheduled requests or measure costs. If scheduling is later enabled, `trigger:scheduled` and `record_id` in result events identify scheduled records; the research protocol, its ID and evaluator remain unchanged.
 
 The journal parser deliberately rejects even identical duplicate record IDs (more conservative than the research evaluator). A blocked execute may create an empty private run-log while preserving any corrupt input unchanged. The defaults of 3/run and 16/day are configurable limits, not immutable ceilings; the selected values bound that run.
+
+## Sample-yield diagnostics (stage A)
+
+Provider classification is diagnostic only: the model still requires the full requested sample (minimum request 50) and all existing freshness/provenance gates. No query filters, prompt, research protocol or evaluator changed. Logs contain only a closed failure category and, for HTTP errors, the numeric status code; response bodies, URLs and exception messages are not included. Historical `provider_error` remains recognized.
+
+Scheduler result events now include `reason`, taken only from the recognized `social.reason` values; missing or unrecognized reasons become JSON null. Reservations/skips have null reason. Old run-log events without the field remain valid and continue consuming the same budget. `reason_counts` counts persisted result events in this run, not reservations/skips; the literal key `unknown` counts null reasons (never a string `null` key). No other provider fields are added to the log.
+
+Offline diagnostic command:
+
+```sh
+python scripts/sample_yield_report.py --log /explicit/path/decisions.jsonl
+```
+
+It prints one JSON line followed by a compact Markdown table. Output contains only aggregate technical data: unique-record counts, status/reason/sample-count distributions, symbol, UTC date/hour, and shares with explicit numerators/denominators. `end_of_results_below_50` uses all unique valid records in its group as denominator; `below_50_among_end_of_results` uses only end_of_results. The latter short-sample counts also have median/min. Legacy provider_error, payment_required and combined provider-failure shares are reported separately. Null or unknown reasons aggregate under `unknown`; source strings are never echoed.
+
+Identical duplicate record IDs count once; conflicting IDs, malformed/truncated JSONL or invalid technical types block the whole report with exit 78/INVALID_LOG, without a partial denominator. Empty files report EMPTY with zero counts and null shares/medians (exit 0). Missing files block. No journal is modified and no network or application configuration is read. Free-form source fields are ignored in output; full-record hashes are used only in memory to distinguish identical duplicates from conflicts. This is descriptive reporting, not a threshold recommendation or evidence of a completed study. Stage B requires a separately reviewed cohort of at least 36 records across 3 complete days; no such runtime gate or sample-threshold change is introduced here.
+
+Provider text must be a string when present (explicit null is malformed); missing text retains an empty string. Username aliases must be strings or null; null/missing/empty values retain the anonymous fallback. Invalid records are stopped before statistics or model evaluation, while previously validated records remain a partial sample. The offline yield-report input is intended to be a regular JSONL file; special files such as FIFOs are outside its supported input contract.

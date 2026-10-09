@@ -315,7 +315,7 @@ def test_no_app_import_in_standalone_source():
 def test_invalid_arguments_complete_neutral_schema(tmp_path,capsys,flag,value):
     code=a.main(['--execute',flag,value,'--log',str(tmp_path/'j'),'--run-log',str(tmp_path/'r')],requester=lambda *a:pytest.fail('request'))
     captured=capsys.readouterr();result=json.loads(captured.out)
-    assert code==78 and result=={'mode':'EXECUTE','status':'BLOCKED','symbols':[],'counts':{},'requests':0,'health':'NOT_CHECKED','code':'INVALID_ARGUMENTS'}
+    assert code==78 and result=={'mode':'EXECUTE','status':'BLOCKED','symbols':[],'counts':{},'reason_counts':{},'requests':0,'health':'NOT_CHECKED','code':'INVALID_ARGUMENTS'}
     assert 'SECRET_SENTINEL' not in captured.out+captured.err and not list(tmp_path.iterdir())
 
 @pytest.mark.parametrize('source',['env','stdin'])
@@ -324,7 +324,7 @@ def test_invalid_token_complete_neutral_schema(tmp_path,monkeypatch,capsys,sourc
     token='SECRET_żółw';monkeypatch.setenv('ADMIN_TOKEN',token);monkeypatch.setattr(a.sys,'stdin',io.StringIO(token+'\n'))
     code=a.main(['--execute','--token-'+source,'--log',str(tmp_path/'j'),'--run-log',str(tmp_path/'r')],requester=lambda *a:pytest.fail('request'))
     captured=capsys.readouterr();result=json.loads(captured.out)
-    assert code==78 and result=={'mode':'EXECUTE','status':'BLOCKED','symbols':[],'counts':{},'requests':0,'health':'NOT_CHECKED','code':'INVALID_ACCESS_TOKEN'}
+    assert code==78 and result=={'mode':'EXECUTE','status':'BLOCKED','symbols':[],'counts':{},'reason_counts':{},'requests':0,'health':'NOT_CHECKED','code':'INVALID_ACCESS_TOKEN'}
     assert token not in captured.out+captured.err and not list(tmp_path.iterdir())
 
 @pytest.mark.parametrize('source',['env','stdin','none'])

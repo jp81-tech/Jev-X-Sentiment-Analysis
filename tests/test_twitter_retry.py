@@ -84,7 +84,7 @@ async def test_retry_after_beyond_budget_not_retried_early(transport):
 async def test_other4xx_not_retried(transport,status,caplog):
     transport['replies']=[(status,{'error':'DO_NOT_LOG_SECRET'}, {})]
     result=await module.TwitterService('synthetic-no-retry').fetch_tweets('BTC',50)
-    assert result['reason']=='provider_error' and len(transport['calls'])==1
+    assert result['reason']==('payment_required' if status==402 else 'http_error') and len(transport['calls'])==1
     assert transport['sleeps']==[]
     assert 'DO_NOT_LOG_SECRET' not in caplog.text and 'synthetic-no-retry' not in caplog.text
 

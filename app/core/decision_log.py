@@ -18,7 +18,8 @@ ROOT = Path(__file__).resolve().parents[2]
 logger = logging.getLogger(__name__)
 ACTIONS = {'STRONG_BUY', 'BUY', 'HOLD', 'TAKE_PROFIT', 'SELL', 'STRONG_SELL'}
 REASONS = {'missing_key', 'target_reached', 'page_limit', 'end_of_results', 'pagination_no_progress',
-           'rate_limited', 'rate_limit_timeout', 'fetch_timeout', 'provider_error', 'rate_limit_capacity'}
+           'rate_limited', 'rate_limit_timeout', 'fetch_timeout', 'provider_error', 'rate_limit_capacity',
+           'payment_required', 'http_error', 'malformed_response', 'transport_error'}
 SENTIMENTS = {'Neutral', 'Neutral / Mixed', 'Extreme Panic', 'Bearish / Fearful', 'Bullish / Optimistic', 'Euphoric / Greedy'}
 
 

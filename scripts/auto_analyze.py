@@ -16,9 +16,12 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 ACTIONS = {'BUY','STRONG_BUY','HOLD','TAKE_PROFIT','SELL','STRONG_SELL'}
+REASONS = {'missing_key', 'target_reached', 'page_limit', 'end_of_results', 'pagination_no_progress',
+           'rate_limited', 'rate_limit_timeout', 'fetch_timeout', 'provider_error', 'rate_limit_capacity',
+           'payment_required', 'http_error', 'malformed_response', 'transport_error'}
 STATUSES = {'success','degraded','unavailable'}
 OUTCOMES = {'OK','SKIPPED_GAP','SKIPPED_BUDGET','LOGGING_FAILED','TIMEOUT','HTTP_ERROR'}
-FIELDS = {'event','attempt_id','ts_utc','trigger','symbol','sample_size','http_code','elapsed_seconds','status','decision_logged','record_id','action','outcome','correlation_id','log_error_category'}
+FIELDS = {'event','attempt_id','ts_utc','trigger','symbol','sample_size','http_code','elapsed_seconds','status','decision_logged','record_id','action','outcome','correlation_id','log_error_category','reason'}
 
 class Blocked(Exception):
     pass
@@ -101,7 +104,10 @@ def _budget_state(entries,now):
     reservations={};completed=set();latest={}
     for item in entries:
         code='RUN_LOG_CORRUPT'
-        require(isinstance(item,dict) and set(item)==FIELDS,code)
+        require(isinstance(item,dict) and set(item) in (FIELDS,FIELDS-{'reason'}),code)
+        reason=item.get('reason')
+        require(reason is None or isinstance(reason,str) and reason in REASONS,code)
+        if item['event']!='result':require(reason is None,code)
         ts=item['ts_utc'];symbol=item['symbol'];event=item['event'];aid=item['attempt_id']
         require(number(ts) and 0<=ts<=now and matches(symbol,r'[A-Z0-9]{1,15}') and type(item['sample_size']) is int and 50<=item['sample_size']<=1000 and item['trigger']=='scheduled',code)
         require(item['http_code'] is None or type(item['http_code']) is int and 100<=item['http_code']<=599,code)
@@ -135,7 +141,7 @@ def budget_state(entries,now):
 
 
 def event(kind,symbol,size,now,aid=None,outcome=None):
-    return dict(event=kind,attempt_id=aid,ts_utc=now,trigger='scheduled',symbol=symbol,sample_size=size,http_code=None,elapsed_seconds=0,status=None,decision_logged=None,record_id=None,action=None,outcome=outcome,correlation_id=None,log_error_category=None)
+    return dict(event=kind,attempt_id=aid,ts_utc=now,trigger='scheduled',symbol=symbol,sample_size=size,http_code=None,elapsed_seconds=0,status=None,decision_logged=None,record_id=None,action=None,outcome=outcome,correlation_id=None,log_error_category=None,reason=None)
 
 
 def append(fd,item):
@@ -165,13 +171,13 @@ def request(port,path,body,token,timeout):
     except Exception:return None,None,'INVALID_RESPONSE'
 
 
-def summarize(mode,symbols,counts,requests,code=None,health='NOT_CHECKED'):
+def summarize(mode,symbols,counts,requests,code=None,health='NOT_CHECKED',reason_counts=None):
     status='BLOCKED' if code and requests==0 else 'PARTIAL' if code or any(counts.get(k,0) for k in OUTCOMES-{'OK'}) else 'PLANNED' if mode=='DRY_RUN' else 'OK'
-    return dict(mode=mode,status=status,symbols=symbols,counts=dict(counts),requests=requests,health=health,**({'code':code} if code else {}))
+    return dict(mode=mode,status=status,symbols=symbols,counts=dict(counts),reason_counts=dict(reason_counts or {}),requests=requests,health=health,**({'code':code} if code else {}))
 
 
 def run(args,requester=request,clock=time.time,token=''):
-    mode='EXECUTE' if args.execute else 'DRY_RUN';counts=Counter();attempts=0;fd=None;health='NOT_CHECKED';logging_failed=False
+    mode='EXECUTE' if args.execute else 'DRY_RUN';counts=Counter();reasons=Counter();attempts=0;fd=None;health='NOT_CHECKED';logging_failed=False
     try:
         now=args.now if args.now is not None else clock();require(number(now) and now>=0,'INVALID_CLOCK')
         require(Path(args.log).resolve()!=Path(args.run_log).resolve(),'INVALID_PATH')
@@ -187,7 +193,7 @@ def run(args,requester=request,clock=time.time,token=''):
                 if now-max(latest.get(symbol,-float('inf')),reserved.get(symbol,-float('inf')))<args.min_gap_hours*3600:counts['SKIPPED_GAP']+=1
                 elif used>=args.max_per_day or counts['PLANNED']>=args.max_per_run:counts['SKIPPED_BUDGET']+=1
                 else:counts['PLANNED']+=1;used+=1
-            return summarize(mode,args.symbols,counts,0),0
+            return summarize(mode,args.symbols,counts,0,reason_counts=reasons),0
         Path(args.run_log).parent.mkdir(parents=True,exist_ok=True)
         fd=open_regular(args.run_log,os.O_RDWR|os.O_CREAT|os.O_APPEND)
         try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -223,6 +229,9 @@ def run(args,requester=request,clock=time.time,token=''):
             item['http_code']=http if type(http) is int and 100<=http<=599 else None
             outcome='TIMEOUT' if error=='TIMEOUT' else 'HTTP_ERROR'
             if http==200 and not error and isinstance(data,dict):
+                social=data.get('social')
+                reason=social.get('reason') if isinstance(social,dict) else None
+                item['reason']=reason if isinstance(reason,str) and reason in REASONS else None
                 status=data.get('status');logged=data.get('decision_logged');rid=data.get('record_id')
                 if isinstance(status,str) and status in STATUSES and type(logged) is bool:
                     item.update(status=status,decision_logged=logged)
@@ -237,11 +246,11 @@ def run(args,requester=request,clock=time.time,token=''):
             item['outcome']=outcome
             # Validate completion before persisting; clock rollback cannot reset budget.
             budget_state(rows(read_fd(fd),'RUN_LOG_CORRUPT')+[item],clock())
-            append(fd,item);counts[outcome]+=1
+            append(fd,item);counts[outcome]+=1;reasons[item['reason'] or 'unknown']+=1
         code='LOGGING_FAILED' if logging_failed else None
-        return summarize(mode,args.symbols,counts,attempts,code,health),0 if counts['OK']==len(args.symbols) else 1
-    except Blocked as error:return summarize(mode,args.symbols,counts,attempts,str(error),health),78 if attempts==0 else 1
-    except Exception:return summarize(mode,args.symbols,counts,attempts,'STORAGE_OR_INPUT_ERROR',health),78 if attempts==0 else 1
+        return summarize(mode,args.symbols,counts,attempts,code,health,reasons),0 if counts['OK']==len(args.symbols) else 1
+    except Blocked as error:return summarize(mode,args.symbols,counts,attempts,str(error),health,reasons),78 if attempts==0 else 1
+    except Exception:return summarize(mode,args.symbols,counts,attempts,'STORAGE_OR_INPUT_ERROR',health,reasons),78 if attempts==0 else 1
     finally:
         if fd is not None:os.close(fd)
 
