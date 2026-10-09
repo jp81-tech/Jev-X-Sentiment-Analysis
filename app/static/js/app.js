@@ -224,6 +224,17 @@ async function runAnalysis(symbol, sampleSize) {
 }
 
 function updateUI(data) {
+    const journalWarning = document.getElementById("journal-warning");
+    if (data.decision_logged === false) {
+        const categories = new Set(["permission", "storage_full", "io", "invalid_record"]);
+        const category = categories.has(data.log_error_category) ? data.log_error_category : "unknown";
+        const correlation = /^[a-f0-9]{32}$/.test(data.correlation_id || "") ? data.correlation_id : "unavailable";
+        journalWarning.textContent = `Decision NOT recorded — ${category}. Reference: ${correlation}. Check the journal before further analyses.`;
+        journalWarning.hidden = false;
+    } else if (data.decision_logged === true) {
+        journalWarning.textContent = "";
+        journalWarning.hidden = true;
+    }
     const market = data.market || {};
     const stats = data.social_stats || {};
     const decision = data.decision || {};

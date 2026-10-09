@@ -66,10 +66,11 @@ async function raceHarness(source) {
     function startA(){node('analyze-btn').listeners.click();assert.equal(requests[0].body.symbol,'BTC');}
     function edit(){node('symbol-input').value='ETH';node('symbol-input').listeners.input();}
     function startB(){edit();node('symbol-input').listeners.keydown({key:'Enter'});assert.equal(requests[1].body.symbol,'ETH');}
-    async function finish(index,error=false){
+    async function finish(index,error=false,journalFields={}){
         if(error) requests[index].reject(new Error(`failure ${index}`));
         else {
             const payload = structuredClone(data);
+            Object.assign(payload,journalFields);
             payload.symbol=requests[index].body.symbol;
             payload.decision.symbol=payload.symbol;
             requests[index].resolve({ok:true,json:async()=>payload});
@@ -83,7 +84,7 @@ async function raceHarness(source) {
     }
     function empty(){assert.equal(vm.runInContext('currentDecision',sandbox),null);assert.equal(node('copy-levels-btn').disabled,true);assert.equal(node('lvl-entry').textContent,'—');}
     function eth(){assert.equal(vm.runInContext('currentDecision.symbol',sandbox),'ETH');assert.equal(node('ticker-symbol').textContent,'ETH/USD');assert.equal(node('copy-levels-btn').disabled,false);}
-    return {startA,startB,edit,finish,loading,empty,eth,alerts};
+    return {startA,startB,edit,finish,loading,empty,eth,alerts,warning:()=>node("journal-warning")};
 }
 
 async function checkRaces(source) {
@@ -153,8 +154,27 @@ async function main() {
         const footer=element('dist-footer').innerHTML;
         assert(footer.includes(`difference (${expected}%`));assert(!footer.includes('+-'));checks++;
     }
+    for (const status of ['success','degraded','unavailable']) {
+        valid();Object.assign(context.data,{status,decision_logged:false,log_error_category:'storage_full',correlation_id:'a'.repeat(32)});render();
+        assert.equal(element('journal-warning').hidden,false);
+        assert(element('journal-warning').textContent.includes('storage_full'));
+        assert(element('journal-warning').textContent.includes('a'.repeat(32)));
+        element('symbol-input').listeners.input();assert.equal(element('journal-warning').hidden,false);
+        context.data.decision_logged=undefined;render();assert.equal(element('journal-warning').hidden,false);
+        context.data.decision_logged=true;render();assert.equal(element('journal-warning').hidden,true);checks++;
+    }
+    valid();Object.assign(context.data,{decision_logged:false,log_error_category:'SECRET_SENTINEL',correlation_id:'SECRET_SENTINEL'});render();
+    assert(!element('journal-warning').textContent.includes('SECRET_SENTINEL'));checks++;
     const source=fs.readFileSync('app/static/js/app.js','utf8');
     checks += await checkRaces(source);
+    for (const oldFailure of [true,false]) {
+        const h=await raceHarness(source);h.startA();h.startB();
+        await h.finish(1,false,{decision_logged:oldFailure,log_error_category:'io',correlation_id:'b'.repeat(32)});
+        const before=h.warning().textContent, hidden=h.warning().hidden;
+        await h.finish(0,false,{decision_logged:!oldFailure,log_error_category:'storage_full',correlation_id:'c'.repeat(32)});
+        assert.equal(h.warning().textContent,before);assert.equal(h.warning().hidden,hidden);checks++;
+    }
+
     // Red control: restore the former unconditional finally only in memory.
     const guarded = `        if (fetchId === requestFetchId) {
             analyzeBtn.disabled = false;

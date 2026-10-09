@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 SANDBOX = Path(tempfile.mkdtemp(prefix="jev-tests-"))
 os.environ["JEV_CONFIG_FILE"] = str(SANDBOX / "settings.test")
+os.environ["JEV_DECISION_LOG"] = str(SANDBOX / "decisions.jsonl")
 os.environ["JEV_DB_PATH"] = str(SANDBOX / "test.sqlite")
 os.environ["TYPESAFE_API_KEY"] = ""
 os.environ["TWITTER_API_KEY"] = ""
@@ -48,6 +49,7 @@ def isolation(monkeypatch, tmp_path):
     from app.services import twitter_service as twitter_module
     from app.services.typesafe_service import typesafe_service
     from app.api.v1 import analyze
+    monkeypatch.setenv("JEV_DECISION_LOG", str(tmp_path / "decisions.jsonl"))
     monkeypatch.setenv("JEV_CONFIG_FILE", str(tmp_path / "settings.test"))
     monkeypatch.setattr(analyze, "CONFIG_PATH", tmp_path / "settings.test")
     monkeypatch.setattr(twitter_module, "db", Database(tmp_path / "test.sqlite"))

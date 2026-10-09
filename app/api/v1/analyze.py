@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 
 from app.core.access import require_access
+from app.core.decision_log import log_response
 from app.core.config import settings, CONFIG_PATH
 from app.core.freshness import market_is_fresh, within_validity, social_is_fresh
 from app.core.market_validation import market_numbers_valid
@@ -52,6 +53,7 @@ async def analyze_asset(req: AnalyzeRequest) -> Dict[str, Any]:
     3. Runs Tier 1 statistical aggregation & stratified sampling.
     4. Evaluates state with TypeSafe Jev System One.
     """
+    request_started_at = time.time()
     sym = req.symbol.strip().upper().replace("$", "")
     if not SYMBOL_REGEX.match(sym):
         raise HTTPException(
@@ -91,7 +93,7 @@ async def analyze_asset(req: AnalyzeRequest) -> Dict[str, Any]:
             decision = None
         status = "success" if decision else ("degraded" if tweets else "unavailable")
 
-        return {
+        response = {
             "symbol": sym,
             "status": status,
             "social": {k: v for k, v in twitter_res.items() if k != "tweets"},
@@ -103,6 +105,9 @@ async def analyze_asset(req: AnalyzeRequest) -> Dict[str, Any]:
             "is_twitter_mock": twitter_res.get("is_mock", False),
             "is_typesafe_mock": bool(decision and decision.get("is_mock"))
         }
+
+        response.update(await asyncio.to_thread(log_response, response, tweets, sample_size, request_started_at, time.time()))
+        return response
 
     except HTTPException:
         raise

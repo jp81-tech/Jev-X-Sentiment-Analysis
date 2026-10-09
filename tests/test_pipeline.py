@@ -209,7 +209,7 @@ def test_ui_node():
     import subprocess
     result = subprocess.run(["node", "tests/test_ui.js"],capture_output=True,text=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "37 UI checks passed" in result.stdout
+    assert "43 UI checks passed" in result.stdout
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("price", [0, float("nan"), float("inf")])
