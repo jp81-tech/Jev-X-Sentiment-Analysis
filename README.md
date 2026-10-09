@@ -247,7 +247,7 @@ The collector attempts XBT/USD first and isolates failures per pair, continuing 
 
 ## Scheduled analysis client (step5)
 
-`scripts/auto_analyze.py` is a standalone local client, not an installed scheduler. Example offline plan:
+`scripts/auto_analyze.py` is a standalone local client, not an installed scheduler. The optional [macOS launchd preparation workflow](scripts/LAUNCHD.md) audits local schedules and stages a disabled, dry-run LaunchAgent; it does not install or activate one. Example offline plan:
 
 ```sh
 python scripts/auto_analyze.py --log /explicit/path/decisions.jsonl --run-log /explicit/path/auto_analyze_runs.jsonl
