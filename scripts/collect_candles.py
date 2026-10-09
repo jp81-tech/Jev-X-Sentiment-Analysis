@@ -12,8 +12,11 @@ from scripts import research_core as r
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*a,**k):return None
 
+def query_pair(pair):return r.pair_name(pair).replace('/','')
+
 def fetch(pair):
-    query=urllib.parse.urlencode({'pair':r.pair_name(pair),'interval':5})
+    # Kraken's public OHLC endpoint rejects the slash form for the benchmark ('XBT/USD' -> EQuery:Unknown asset pair); altnames without the slash work for every pair.
+    query=urllib.parse.urlencode({'pair':query_pair(pair),'interval':5})
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
     req=urllib.request.Request('https://api.kraken.com/0/public/OHLC?'+query,headers={'User-Agent':'Jev-research-candle-collector/1'})
     with opener.open(req,timeout=15) as response:
@@ -25,7 +28,7 @@ def parse_response(payload,now):
     r.need(isinstance(payload,dict) and payload.get('error')==[])
     result=payload.get('result');r.need(isinstance(result,dict))
     keys=[k for k in result if k!='last'];r.need(len(keys)==1)
-    raw=result[keys[0]];r.need(isinstance(raw,list) and len(raw)<=720)
+    raw=result[keys[0]];r.need(isinstance(raw,list) and len(raw)<=721)  # 720 closed candles + the current one, which is dropped below
     rows=[]
     for values in raw[:-1]:  # Always exclude Kraken's current candle, independent of last.
         r.need(isinstance(values,list) and len(values)>=8)
