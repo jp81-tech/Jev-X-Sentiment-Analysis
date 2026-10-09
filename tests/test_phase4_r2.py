@@ -38,7 +38,7 @@ def test_collector_corrupt_cache_and_cli_exit(tmp_path,monkeypatch,capsys):
 
 def test_audit_dedup_and_coverage_history(tmp_path):
     rec=record();log=tmp_path/'log';write(log,[rec]);cache=tmp_path/'cache';out=tmp_path/'out';audit=tmp_path/'audit'
-    def run():return settle.settle(log,cache,out,audit,PROTOCOL,now=rec['ts_utc']+432000)
+    def run():return settle.settle(log,cache,out,audit,PROTOCOL,now=rec['ts_utc']+518400)
     first=run();old=audit.read_bytes();second=run()
     assert first['audit_new']==1 and second['incomplete']==1 and second['audit_new']==0 and audit.read_bytes()==old
     write(r.candle_path(cache,'ETH/USD'),[row(r.required(rec['ts_utc'],r.H72)[0])])
@@ -92,14 +92,18 @@ def test_repair_symlink_and_permissions(tmp_path):
 
 def test_startup_provenance_survives_disk_edit(tmp_path,monkeypatch):
     source=journal.ROOT/'app/services/typesafe_service.py';target=tmp_path/'app/services/typesafe_service.py';target.parent.mkdir(parents=True);target.write_text(source.read_text())
-    modulepath=tmp_path/'app/core/decision_log.py';modulepath.parent.mkdir();modulepath.write_text(Path(journal.__file__).read_text())
+    for relative in ('app/services/stats_service.py','app/services/twitter_service.py','app/core/config.py'):
+        dest=tmp_path/relative;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_text((journal.ROOT/relative).read_text())
+    modulepath=tmp_path/'app/core/decision_log.py';modulepath.parent.mkdir(exist_ok=True);modulepath.write_text(Path(journal.__file__).read_text())
     monkeypatch.setattr(journal.subprocess,'check_output',lambda command,**kw:'a'*40 if 'rev-parse' in command else '')
     spec=importlib.util.spec_from_file_location('isolated_journal',modulepath);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-    original=module.STARTUP_PROMPT_VERSION
+    original=module.STARTUP_PROMPT_VERSION;original_inputs=module.STARTUP_INPUTS_VERSION
+    (tmp_path/'app/services/stats_service.py').write_text('changed disk after startup')
     target.write_text('invalid changed source');monkeypatch.setenv('JEV_APP_COMMIT','b'*40)
     module.prompt_version.cache_clear();module.app_commit.cache_clear()
     result=module.record_for({'status':'unavailable'},[],50,1,2)
     assert result['prompt_version']==original and result['app_commit']=='a'*40
+    assert result['inputs_version']==original_inputs
 
 @pytest.mark.asyncio
 async def test_append_runs_off_loop_and_error_correlation(monkeypatch,caplog):

@@ -40,9 +40,10 @@ async def test_three_statuses_three_private_rows(monkeypatch):
     assert len(rows)==3 and [r['status'] for r in rows]==['success','degraded','unavailable']
     assert len({r['record_id'] for r in rows})==3 and SECRET not in raw
     assert path.stat().st_mode & 0o777==0o600
-    required={'schema_version','record_id','ts_utc','request_started_at','app_commit','prompt_version','symbol','pair','sample_size','status','reason','sample_hash','sample_count','oldest_publication_at','newest_publication_at','rejected_dates','market','social_stats','decision','horizons','settled'}
+    required={'schema_version','record_id','ts_utc','request_started_at','app_commit','prompt_version','inputs_version','symbol','pair','sample_size','status','reason','sample_hash','sample_count','oldest_publication_at','newest_publication_at','rejected_dates','market','social_stats','decision','horizons','settled'}
     for row in rows:
         assert set(row)==required and row['schema_version']==1 and len(row['prompt_version'])==64
+        assert row['inputs_version']==journal.STARTUP_INPUTS_VERSION
         assert row['horizons']=={'H24':row['ts_utc']+86400,'H72':row['ts_utc']+259200}
         assert row['request_started_at']<=row['ts_utc'] and row['settled'] is None
     assert rows[0]['decision']['trade_levels']['method']=='fixed_percentage_heuristic'

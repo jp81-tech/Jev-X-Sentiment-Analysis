@@ -9,7 +9,7 @@ import re
 HOUR=3600
 H72=72*HOUR
 ACTIONS={'BUY':1,'STRONG_BUY':1,'SELL':-1,'STRONG_SELL':-1,'HOLD':0,'TAKE_PROFIT':0}
-PARAMS={'version':'2.1-corrected','costs':[.003,.005],'delta':.003,'min_n':30,'min_days':30,
+PARAMS={'version':'2.2','placebo_offsets_hours':[-72,72],'costs':[.003,.005],'delta':.003,'min_n':30,'min_days':30,
         'min_symbols':2,'min_blocks':10,'min_greedy':15,'block_seconds':H72,'permutations':1000,'seed':20261008}
 
 class InvalidData(ValueError):pass
@@ -54,9 +54,10 @@ def check_finite(value):
 def sha(value):return isinstance(value,str) and re.fullmatch('[0-9a-f]{64}',value) is not None
 
 def protocol(path):
-    p=load_json(path);need(isinstance(p,dict) and set(p)==set(PARAMS)|{'prompt_version','document_sha256'})
+    p=load_json(path);need(isinstance(p,dict) and set(p)==set(PARAMS)|{'prompt_version','inputs_version','document_sha256'})
     need(all(p[k]==v and type(p[k]) is type(v) for k,v in PARAMS.items()))
-    need(sha(p['prompt_version']) and sha(p['document_sha256']))
+    need(all(type(v) is int for v in p['placebo_offsets_hours']))
+    need(sha(p['prompt_version']) and sha(p['inputs_version']) and sha(p['document_sha256']))
     doc=Path(path).parent/'RESEARCH-PROTOCOL.md'
     need(hashlib.sha256(doc.read_bytes()).hexdigest()==p['document_sha256'])
     return p,digest(p)
@@ -76,6 +77,7 @@ def validate_record(r):
     for name in ('sample_size','sample_count'):
         need(type(r.get(name)) is int and 0<=r[name]<=1000)
     need(sha(r.get('sample_hash')))
+    if 'inputs_version' in r:need(sha(r['inputs_version']))
     d=r.get('decision')
     if r['status']=='success':
         need(isinstance(d,dict) and isinstance(d.get('action'),str) and d['action'] in ACTIONS)
@@ -137,9 +139,24 @@ def window_result(record,asset,benchmark,t,h):
             'max_high':high,'min_low':low,'mae_pct':(low/entry-1) if sign>0 else (1-high/entry),
             'mfe_pct':(high/entry-1) if sign>0 else (1-low/entry),'first_hit':first,'hit_ts':hits}
 
-def settle_record(record,horizon,cache,protocol_id,now):
+def window_offsets(horizon, offsets=None):
+    values=PARAMS['placebo_offsets_hours'] if offsets is None else offsets
+    need(values==[-72,72] and all(type(v) is int for v in values))
+    return {'main':0} if horizon=='H24' else {'main':0,'pre72':values[0]*HOUR,'post72':values[1]*HOUR}
+
+def beta_estimate(asset, benchmark, indices):
+    pairs=[(benchmark[b]['c']/benchmark[a]['c']-1, asset[b]['c']/asset[a]['c']-1) for a,b in zip(indices,indices[1:]) if a in asset and b in asset and a in benchmark and b in benchmark]
+    if len(pairs)<100:return {'beta':None,'reason':'insufficient_observations','n':len(pairs)}
+    xbar=math.fsum(x for x,y in pairs)/len(pairs);ybar=math.fsum(y for x,y in pairs)/len(pairs)
+    denominator=math.fsum((x-xbar)**2 for x,y in pairs)
+    if denominator==0:return {'beta':None,'reason':'zero_benchmark_variance','n':len(pairs)}
+    beta=math.fsum((x-xbar)*(y-ybar) for x,y in pairs)/denominator
+    if not finite(beta):return {'beta':None,'reason':'nonfinite_estimate','n':len(pairs)}
+    return {'beta':beta,'reason':None,'n':len(pairs)}
+
+def settle_record(record,horizon,cache,protocol_id,now,offsets=None):
     need(horizon in ('H24','H72'));h=24*HOUR if horizon=='H24' else H72
-    offsets={'main':0} if horizon=='H24' else {'main':0,'minus24':-24*HOUR,'plus48':48*HOUR}
+    offsets=window_offsets(horizon,offsets)
     pair=pair_name(record['pair']);pairs=sorted({pair,'XBT/USD'});sets={};coverage={};used=[]
     indices=sorted({ts for delta in offsets.values() for ts in required(record['ts_utc']+delta,h)})
     for name in pairs:
@@ -148,9 +165,13 @@ def settle_record(record,horizon,cache,protocol_id,now):
         missing=[ts for ts in indices if ts not in data or ts+300>now]
         coverage[name]={'present':present,'missing':missing,'conflicting':[ts for ts in indices if ts in bad]}
         used.append([name,[[ts]+[data[ts][k] for k in ('o','h','l','c','v')] for ts in present]])
-    base={'record_id':record['record_id'],'record_hash':digest(record),'protocol_id':protocol_id,'horizon':horizon,'coverage':coverage}
+    base={'record_id':record['record_id'],'record_hash':digest(record),'protocol_id':protocol_id,'horizon':horizon,'inputs_version':record.get('inputs_version'),'coverage':coverage}
     if any(v['missing'] for v in coverage.values()):return dict(base,settle_status='INCOMPLETE')
     windows={name:window_result(record,sets[pair],sets['XBT/USD'],record['ts_utc']+delta,h) for name,delta in offsets.items()}
+    estimate=beta_estimate(sets[pair],sets['XBT/USD'],required(record['ts_utc']+offsets['pre72'],H72)) if horizon=='H72' else {'beta':None,'reason':'not_H72','n':0}
+    main=windows['main'];sign=ACTIONS[record['decision']['action']]
+    main['alpha_beta_adj']=main['ret']-sign*estimate['beta']*main['bench_ret'] if estimate['beta'] is not None else None
+    main['beta_estimate']=estimate
     return dict(base,settle_status='OK',candles_hash=digest(used),benchmark_self=record['symbol']=='BTC',candles_used=len(indices)*len(pairs),windows=windows)
 
 def settlement_index(path):
@@ -223,6 +244,34 @@ def summary(values,blocks):
                   mde_approx=(t_quantile(.975,g-1)+t_quantile(.80,g-1))*se,degenerate=se==0)
     return result
 
+def needed_sample(s, delta, cost):
+    """Descriptive precision extrapolation, not power or a future verdict."""
+    n,g,se,mean=(s[k] for k in ('n','g','se','mean'))
+    def estimate(width, probability):
+        if g<2 or se is None:return None,'insufficient_blocks'
+        if se<=0:return None,'degenerate_se'
+        if width<=0:return None,'mean_not_above_cost'
+        def fits(candidate):
+            groups=max(2,math.floor(g*candidate/n))
+            return t_quantile(probability,groups-1)*se*math.sqrt(n/candidate)<width
+        cap=10000000
+        if n>cap:return None,'search_limit'
+        upper=n
+        while upper<cap and not fits(upper):upper=min(cap,upper*2)
+        if not fits(upper):return None,'search_limit'
+        lower=n
+        while lower<upper:
+            mid=(lower+upper)//2
+            if fits(mid):upper=mid
+            else:lower=mid+1
+        return lower,None
+    no_edge,reason=estimate(delta,.95)
+    edge,edge_reason=estimate(mean-cost if mean is not None else 0,.975)
+    return {'n_needed_no_edge':no_edge,'n_needed_no_edge_reason':reason,
+            'n_needed_edge_positive':edge,'n_needed_edge_positive_reason':edge_reason,
+            'note':'Approximate CI precision only: fixed mean/SE model, SE scales sqrt(n/n_new), g_new=floor(g*n_new/n); no power or verdict guarantee; no-edge ignores mean displacement',
+            'search_cap':10000000}
+
 def greedy(rows):
     last={};selected=[]
     for row in sorted(rows,key=lambda r:(r['entry_ts'],r['record_id'])):
@@ -238,24 +287,28 @@ def evaluate_rows(rows,t0,now,p,preview=False):
     counts={'n':len(rows),'days':math.floor((now-t0)/86400),'symbols':sorted({r['symbol'] for r in rows}),
             'blocks':len(set(blocks(rows))),'greedy_n':len(selected),'greedy_blocks':len(set(blocks(selected)))}
     enough=(counts['n']>=p['min_n'] and counts['days']>=p['min_days'] and len(counts['symbols'])>=p['min_symbols'] and counts['blocks']>=p['min_blocks'] and counts['greedy_n']>=p['min_greedy'] and counts['greedy_blocks']>=p['min_blocks'])
-    if not enough and not preview:return dict(counts,verdict='SAMPLE_TOO_SMALL')
-    stats={key:summary([r[key] for r in rows],blocks(rows)) for key in ('alpha','ret','minus24','plus48')}
+    precision=needed_sample(summary([r['alpha'] for r in rows],blocks(rows)),p['delta'],max(p['costs']))
+    if not enough and not preview:return dict(counts,verdict='SAMPLE_TOO_SMALL',**precision)
+    stats={key:summary([r[key] for r in rows],blocks(rows)) for key in ('alpha','ret','pre72','post72')}
     gs=summary([r['alpha'] for r in selected],blocks(selected));main=stats['alpha']
     fade=all(abs(r['fade']+r['alpha'])<1e-9 for r in rows)
     if not enough:verdict='SAMPLE_TOO_SMALL'
     elif any(s['degenerate'] for s in [*stats.values(),gs]):verdict='DEGENERATE'
-    elif main['ci95'][0]>max(p['costs']) and gs['ci95'][0]>max(p['costs']) and all(equivalent(stats[k],p['delta']) for k in ('minus24','plus48')) and fade:verdict='EDGE_POSITIVE'
+    elif main['ci95'][0]>max(p['costs']) and gs['ci95'][0]>max(p['costs']) and all(equivalent(stats[k],p['delta']) for k in ('pre72','post72')) and fade:verdict='EDGE_POSITIVE'
     elif equivalent(main,p['delta']) and equivalent(gs,p['delta']):verdict='NO_EDGE'
     else:verdict='INCONCLUSIVE'
     rng=random.Random(p['seed']);permutations=[];bl=blocks(rows)
     for _ in range(p['permutations']):
         signs={b:rng.choice((-1,1)) for b in set(bl)}
         permutations.append(abs(math.fsum(r['alpha']*signs[b] for r,b in zip(rows,bl))/len(rows)) if rows else 0.)
-    result=dict(counts,verdict=verdict,statistics=stats,greedy=gs,fade_mirror=fade,
-                placebo_tost={k:equivalent(stats[k],p['delta']) for k in ('minus24','plus48')},
+    result=dict(counts,**precision,verdict=verdict,statistics=stats,greedy=gs,fade_mirror=fade,
+                placebo_tost={k:equivalent(stats[k],p['delta']) for k in ('pre72','post72')},
                 net={str(c):{'mean':main['mean']-c if rows else None,'ci95':[v-c for v in main['ci95']] if main['ci95'] else None} for c in p['costs']},
                 permutation_p=(1+sum(x>=abs(main['mean'] or 0) for x in permutations))/(p['permutations']+1),
                 mde_note='Approximation: SE treated as known; no exact power claim',preview=preview)
+    adjusted=[r for r in rows if finite(r.get('alpha_beta_adj'))]
+    result['alpha_beta_adj']=summary([r['alpha_beta_adj'] for r in adjusted],blocks(adjusted))
+    result['alpha_beta_adj']['excluded']=len(rows)-len(adjusted)
     result['hit_rate']=sum(r['ret']>0 for r in rows)/len(rows) if rows else None
     result['first_hit']={k:sum(r['first_hit']==k for r in rows) for k in ('SL','TP1','TP2','NONE')}
     result['descriptive_sides']={side:summary([r['alpha'] for r in rows if r['side']==side],[b for r,b in zip(rows,bl) if r['side']==side]) for side in ('BUY','SELL')}

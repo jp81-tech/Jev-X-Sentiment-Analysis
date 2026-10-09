@@ -47,6 +47,40 @@ def prompt_fingerprint(source):
     return hashlib.sha256(json.dumps(definitions, sort_keys=True).encode()).hexdigest()
 
 
+def inputs_fingerprint(stats_source, twitter_source, config_source):
+    """Only semantic input definitions; no imports, comments or source positions."""
+    stats, twitter, config = map(ast.parse, (stats_source, twitter_source, config_source))
+    def method(tree, cls, name):
+        owner = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls)
+        return next(n for n in owner.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
+    definitions = {'process_tweets': method(stats, 'StatsService', 'process_tweets'),
+                   '_build_query': method(twitter, 'TwitterService', '_build_query')}
+    for name in ('FEAR_KEYWORDS', 'GREED_KEYWORDS'):
+        definitions[name] = next(n.value for n in stats.body if isinstance(n, ast.Assign)
+                                 and any(isinstance(t, ast.Name) and t.id == name for t in n.targets))
+    field = next(n.value for n in ast.walk(config) if isinstance(n, ast.AnnAssign)
+                 and isinstance(n.target, ast.Name) and n.target.id == 'SOCIAL_WINDOW_HOURS')
+    definitions['SOCIAL_WINDOW_HOURS'] = field.args[0] if isinstance(field, ast.Call) else field
+    def normalized(value):
+        if isinstance(value, ast.AST):
+            # Optional/empty fields are omitted consistently, never via ast.dump's
+            # interpreter-dependent text defaults. Source locations are excluded.
+            return {'node': type(value).__name__, 'fields': {
+                key: normalized(item) for key, item in ast.iter_fields(value)
+                if item is not None and item != []}}
+        if isinstance(value, list):
+            return [normalized(item) for item in value]
+        return value
+    canonical = {key: normalized(value) for key, value in definitions.items()}
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+@lru_cache(maxsize=1)
+def inputs_version():
+    return inputs_fingerprint(*( (ROOT/path).read_text() for path in
+        ('app/services/stats_service.py', 'app/services/twitter_service.py', 'app/core/config.py')))
+
+
 @lru_cache(maxsize=1)
 def prompt_version():
     return prompt_fingerprint((ROOT/'app/services/typesafe_service.py').read_text())
@@ -67,6 +101,7 @@ def app_commit():
 
 # Capture provenance before requests; later disk edits cannot relabel this process.
 STARTUP_PROMPT_VERSION = prompt_version()
+STARTUP_INPUTS_VERSION = inputs_version()
 STARTUP_APP_COMMIT = app_commit()
 
 def number(value):
@@ -119,7 +154,7 @@ def record_for(response, tweets, sample_size, request_started_at, now):
     clean_stats.update(sentiment_label=choice(stats.get('sentiment_label'),SENTIMENTS), polarity_method=choice(stats.get('polarity_method'),{'keyword_heuristic'}))
     rejected = social.get('rejected_dates')
     return {'schema_version':1,'record_id':uuid.uuid4().hex,'ts_utc':number(now),
-            'request_started_at':number(request_started_at),'app_commit':STARTUP_APP_COMMIT,'prompt_version':STARTUP_PROMPT_VERSION,
+            'request_started_at':number(request_started_at),'app_commit':STARTUP_APP_COMMIT,'prompt_version':STARTUP_PROMPT_VERSION,'inputs_version':STARTUP_INPUTS_VERSION,
             'symbol':pattern(response.get('symbol'),r'[A-Z0-9]{1,15}'), 'pair':pattern(market.get('pair'),r'[A-Z0-9]{1,15}/[A-Z0-9]{1,15}'),
             'sample_size':count(sample_size),'status':choice(response.get('status'),{'success','degraded','unavailable'}),
             'reason':choice(social.get('reason'),REASONS),'sample_hash':sample_hash(tweets),'sample_count':len(tweets),

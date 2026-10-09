@@ -5,13 +5,13 @@ from pathlib import Path
 import pytest
 from scripts import research_core as r
 from scripts import settle_decisions as settle, evaluate_decisions as evaluate, collect_candles as collect
-from app.core.decision_log import prompt_version
+from app.core.decision_log import prompt_version, inputs_version
 
 ROOT=Path(__file__).resolve().parents[1]
 PROTOCOL=ROOT/'research_protocol.json'
 
 def record(i=1,t=1800100,symbol='ETH',action='BUY'):
-    return {'schema_version':1,'record_id':f'{i:032x}','ts_utc':t,'prompt_version':prompt_version(),'status':'success',
+    return {'schema_version':1,'record_id':f'{i:032x}','ts_utc':t,'prompt_version':prompt_version(),'inputs_version':inputs_version(),'status':'success',
             'symbol':symbol,'pair':symbol+'/USD','sample_size':50,'sample_count':50,'sample_hash':'a'*64,
             'decision':{'action':action,'trade_levels':{'stop_loss':90 if action=='BUY' else 110,'target_1':110 if action=='BUY' else 90,'target_2':120 if action=='BUY' else 80}}}
 
@@ -20,7 +20,7 @@ def write(path,rows):
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True);path.write_text(''.join(r.canonical(x)+'\n' for x in rows))
 
 def cache_fixture(tmp_path,rec,horizon='H72'):
-    h=86400 if horizon=='H24' else r.H72;offsets=[0] if horizon=='H24' else [0,-86400,172800]
+    h=86400 if horizon=='H24' else r.H72;offsets=[0] if horizon=='H24' else [0,-259200,259200]
     indices=sorted({ts for delta in offsets for ts in r.required(rec['ts_utc']+delta,h)})
     cache={pair:({ts:row(ts) for ts in indices},set()) for pair in {r.pair_name(rec['pair']),'XBT/USD'}}
     for pair,(data,_) in cache.items():write(r.candle_path(tmp_path,pair),data.values())
@@ -54,10 +54,10 @@ def test_entry_candle_excluded_and_sl_tie(tmp_path):
     rec=record();cache=cache_fixture(tmp_path,rec)
     indices=r.required(rec['ts_utc'],r.H72);data=cache['ETH/USD'][0]
     data[indices[0]].update(h=200,l=1)
-    result=r.settle_record(rec,'H72',cache,'a'*64,rec['ts_utc']+120*3600)
+    result=r.settle_record(rec,'H72',cache,'a'*64,rec['ts_utc']+144*3600)
     assert result['windows']['main']['first_hit']=='NONE'
     data[indices[1]].update(h=121,l=89)
-    result=r.settle_record(rec,'H72',cache,'a'*64,rec['ts_utc']+120*3600)
+    result=r.settle_record(rec,'H72',cache,'a'*64,rec['ts_utc']+144*3600)
     assert result['windows']['main']['first_hit']=='SL'
     assert result['windows']['main']['hit_ts']['TP1'] is None
 
@@ -65,15 +65,15 @@ def test_hand_computed_buy_sell_btc_and_determinism(tmp_path):
     rec=record();cache=cache_fixture(tmp_path,rec);indices=r.required(rec['ts_utc'],r.H72)
     cache['ETH/USD'][0][indices[-1]].update(c=110,h=111)
     cache['XBT/USD'][0][indices[-1]].update(c=105,h=106)
-    buy=r.settle_record(rec,'H72',cache,'a'*64,rec['ts_utc']+432000)
+    buy=r.settle_record(rec,'H72',cache,'a'*64,rec['ts_utc']+518400)
     assert buy['windows']['main']['ret']==pytest.approx(.1)
     assert buy['windows']['main']['alpha']==pytest.approx(.05)
     assert buy['windows']['main']['fade']==pytest.approx(-.05)
     assert r.canonical(buy)==r.canonical(r.settle_record(rec,'H72',cache,'a'*64,rec['ts_utc']+999999))
     rec['decision']['action']='SELL'
-    sell=r.settle_record(rec,'H72',cache,'a'*64,rec['ts_utc']+432000)
+    sell=r.settle_record(rec,'H72',cache,'a'*64,rec['ts_utc']+518400)
     assert sell['windows']['main']['ret']==pytest.approx(-.1) and sell['windows']['main']['alpha']==pytest.approx(-.05)
-    btc=record(symbol='BTC');result=r.settle_record(btc,'H72',cache,'a'*64,btc['ts_utc']+432000)
+    btc=record(symbol='BTC');result=r.settle_record(btc,'H72',cache,'a'*64,btc['ts_utc']+518400)
     assert result['benchmark_self'] is True
 
 def test_future_gaps_incomplete_then_ok_and_conflicts(tmp_path):
@@ -82,13 +82,13 @@ def test_future_gaps_incomplete_then_ok_and_conflicts(tmp_path):
     result=settle.settle(log,cache_dir,out,audit,PROTOCOL,now=rec['ts_utc']+72*3600)
     assert result['incomplete']==1 and not r.jsonl(out)
     assert settle.settle(log,cache_dir,out,audit,PROTOCOL,'H24',rec['ts_utc']+86400)['ok_new']==1
-    result=settle.settle(log,cache_dir,out,audit,PROTOCOL,now=rec['ts_utc']+432000)
+    result=settle.settle(log,cache_dir,out,audit,PROTOCOL,now=rec['ts_utc']+518400)
     assert result['ok_new']==1
     before=out.read_bytes()
-    assert settle.settle(log,cache_dir,out,audit,PROTOCOL,now=rec['ts_utc']+432000)['ok_new']==0
+    assert settle.settle(log,cache_dir,out,audit,PROTOCOL,now=rec['ts_utc']+518400)['ok_new']==0
     assert out.read_bytes()==before
     rows=r.jsonl(out);rows[-1]['candles_hash']='f'*64;r.append_jsonl(out,[rows[-1]])
-    result=evaluate.evaluate(log,out,cache_dir,PROTOCOL,rec['ts_utc']+432000)
+    result=evaluate.evaluate(log,out,cache_dir,PROTOCOL,rec['ts_utc']+518400)
     assert result['conflicts']['settlements']==1 and result['n']==0
     assert result['verdict']=='SAMPLE_TOO_SMALL'
 
@@ -98,7 +98,7 @@ def cohort(mean=.02):
         t=1000000+i*86400;noise=((i//3)%3-1)*.0001
         result.append({'record_id':f'{i:032x}','symbol':('ETH','SOL','ADA')[i%3], 'ts_utc':t,'entry_ts':t+200,
                        'alpha':mean+noise,'ret':mean+noise+.001,'fade':-mean-noise,
-                       'minus24':noise,'plus48':-noise,'first_hit':'NONE','side':'BUY' if i%2 else 'SELL'})
+                       'pre72':noise,'post72':-noise,'first_hit':'NONE','side':'BUY' if i%2 else 'SELL'})
     return result
 
 @pytest.mark.parametrize('mean,verdict',[(.02,'EDGE_POSITIVE'),(0.,'NO_EDGE'),(.004,'INCONCLUSIVE')])
@@ -157,8 +157,8 @@ def test_conflicting_records_and_candles(tmp_path):
 
 def test_protocol_join_tampering_and_output_safety(tmp_path):
     rec=record();log=tmp_path/'log';write(log,[rec]);cache_fixture(tmp_path/'cache',rec)
-    with pytest.raises(r.InvalidData):settle.settle(log,tmp_path/'cache',log,tmp_path/'audit',PROTOCOL,now=rec['ts_utc']+432000)
-    out=tmp_path/'out';settle.settle(log,tmp_path/'cache',out,tmp_path/'audit',PROTOCOL,now=rec['ts_utc']+432000)
+    with pytest.raises(r.InvalidData):settle.settle(log,tmp_path/'cache',log,tmp_path/'audit',PROTOCOL,now=rec['ts_utc']+518400)
+    out=tmp_path/'out';settle.settle(log,tmp_path/'cache',out,tmp_path/'audit',PROTOCOL,now=rec['ts_utc']+518400)
     rows=r.jsonl(out);rows[0]['windows']['main']['alpha']=100;write(out,rows)
     result=evaluate.evaluate(log,out,tmp_path/'cache',PROTOCOL,rec['ts_utc']+40*86400)
     assert result['n']==0 and result['conflicts']['settlements']==1
@@ -181,7 +181,7 @@ def test_cli_dryrun_preview_and_strict_json(tmp_path,capsys,monkeypatch):
 def test_missing_candle_and_corruption_are_not_replaced(tmp_path):
     rec=record();cache=cache_fixture(tmp_path,rec);index=r.required(rec['ts_utc'],r.H72)[10]
     del cache['ETH/USD'][0][index]
-    result=r.settle_record(rec,'H72',cache,'a'*64,rec['ts_utc']+432000)
+    result=r.settle_record(rec,'H72',cache,'a'*64,rec['ts_utc']+518400)
     assert result['settle_status']=='INCOMPLETE' and index in result['coverage']['ETH/USD']['missing']
 
 
@@ -194,7 +194,7 @@ def test_nonoverlap_noedge_and_placebo_are_required():
     selected=r.greedy(rows)
     assert all(b['entry_ts']>=a['entry_ts']+r.H72 for sym in ('ETH','SOL','ADA') for a,b in zip([x for x in selected if x['symbol']==sym],[x for x in selected if x['symbol']==sym][1:]))
     rows=cohort(.02)
-    for x in rows:x['plus48']+=.01
+    for x in rows:x['post72']+=.01
     assert r.evaluate_rows(rows,1000000,1000000+40*86400,r.PARAMS)['verdict']=='INCONCLUSIVE'
 
 
@@ -208,7 +208,7 @@ def test_no_edge_requires_greedy_equivalence():
     for i,x in enumerate(rows):
         noise=((i//6)%3-1)*.00003
         alpha=(.004 if x['record_id'] in selected else negative)+noise
-        x.update(alpha=alpha,ret=alpha+.001,fade=-alpha,minus24=noise,plus48=-noise)
+        x.update(alpha=alpha,ret=alpha+.001,fade=-alpha,pre72=noise,post72=-noise)
     result=r.evaluate_rows(rows,1000000,1000000+41*86400,r.PARAMS)
     assert r.equivalent(result['statistics']['alpha'],.003)
     assert not r.equivalent(result['greedy'],.003)
@@ -217,9 +217,9 @@ def test_no_edge_requires_greedy_equivalence():
 
 def test_collector_final_catchup_after_horizon(tmp_path):
     rec=record();log=tmp_path/'log';write(log,[rec])
-    for elapsed in (96*3600,120*3600+60):
+    for elapsed in (96*3600,144*3600+60):
         report=collect.collect(log,tmp_path/'cache',now=rec['ts_utc']+elapsed)
-        assert report['pairs']==['ETH/USD','XBT/USD']
+        assert report['pairs']==['XBT/USD','ETH/USD']
         assert report['requests']==0
     expired=collect.collect(log,tmp_path/'cache',now=rec['ts_utc']+180*3600+1)
     assert expired['pairs']==[] and expired['coverage_status']=='INCOMPLETE'

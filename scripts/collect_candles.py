@@ -38,16 +38,20 @@ def parse_response(payload,now):
     return rows
 
 
-def collect(log,cache_dir,now=None,execute=False,fetcher=fetch,sleep=time.sleep):
+def collect(log,cache_dir,now=None,execute=False,fetcher=fetch,sleep=time.sleep,track=''):
     fixed_clock = now is not None
     now=time.time() if now is None else now;r.need(r.finite(now) and now>=0)
+    r.need(isinstance(track,str))
+    symbols=track.split(',') if track else []
+    r.need(all(__import__('re').fullmatch('[A-Z0-9]{1,15}',x) is not None for x in symbols))
     records,conflicts=r.unique_records(log)
     directional=[x for x in records.values() if x['status']=='success' and r.ACTIONS[x['decision']['action']] and x['ts_utc']<=now]
     # Keep a final catch-up opportunity after the horizon, within Kraken retention.
     pairs={r.pair_name(x['pair']) for x in directional if now<=x['ts_utc']+180*r.HOUR}
     expired=sum(now>x['ts_utc']+180*r.HOUR for x in directional)
+    pairs.update(r.pair_name(sym+'/USD') for sym in symbols)
     if pairs:pairs.add('XBT/USD')
-    report={'mode':'EXECUTE' if execute else 'DRY_RUN','pairs':sorted(pairs),'requests':0,'stored':0,'conflicts_records':conflicts,'past_catchup_records':expired,'coverage_status':'INCOMPLETE' if expired else 'NOT_ASSESSED'}
+    report={'mode':'EXECUTE' if execute else 'DRY_RUN','pairs':sorted(pairs,key=lambda x:(x!='XBT/USD',x)),'requests':0,'stored':0,'conflicts_records':conflicts,'past_catchup_records':expired,'coverage_status':'INCOMPLETE' if expired else 'NOT_ASSESSED'}
     if not execute:return report
     report['pair_results']={}
     for index,pair in enumerate(sorted(pairs,key=lambda x:(x!='XBT/USD',x))):
@@ -73,11 +77,11 @@ def collect(log,cache_dir,now=None,execute=False,fetcher=fetch,sleep=time.sleep)
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--log',required=True);parser.add_argument('--candles',required=True)
-    parser.add_argument('--execute',action='store_true');parser.add_argument('--dry-run',action='store_true')
+    parser.add_argument('--track',default='');parser.add_argument('--execute',action='store_true');parser.add_argument('--dry-run',action='store_true')
     args=parser.parse_args(argv)
     try:
         r.need(not(args.execute and args.dry_run))
-        result=collect(args.log,args.candles,execute=args.execute)
+        result=collect(args.log,args.candles,execute=args.execute,track=args.track)
         print(json.dumps(result,allow_nan=False));return 78 if result.get('status') in ('PARTIAL','BLOCKED') else 0
     except Exception:
         print(json.dumps({'status':'BLOCKED','code':'INVALID_INPUT_OR_PROVIDER_ERROR'}));return 78

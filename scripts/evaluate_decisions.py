@@ -13,7 +13,7 @@ def evaluate(log,settlements,cache_dir,protocol_path,now=None,preview=False):
     now=time.time() if now is None else now;r.need(r.finite(now) and now>=0)
     p,pid=r.protocol(protocol_path);records,record_conflicts=r.unique_records(log)
     index,bad=r.settlement_index(settlements)
-    cohort=[x for x in records.values() if x['prompt_version']==p['prompt_version'] and x['status']=='success' and r.ACTIONS[x['decision']['action']]]
+    cohort=[x for x in records.values() if x['prompt_version']==p['prompt_version'] and x.get('inputs_version')==p['inputs_version'] and x['status']=='success' and r.ACTIONS[x['decision']['action']]]
     pairs={r.pair_name(x['pair']) for x in cohort}|{'XBT/USD'};cache={pair:r.candles(cache_dir,pair) for pair in pairs}
     rows=[];btc=[];h24=[];incomplete=0;conflicts=set(bad)
     for record in cohort:
@@ -24,7 +24,7 @@ def evaluate(log,settlements,cache_dir,protocol_path,now=None,preview=False):
             if row is None:
                 if horizon=='H72':incomplete+=1
                 continue
-            expected=r.settle_record(record,horizon,cache,pid,now)
+            expected=r.settle_record(record,horizon,cache,pid,now,p['placebo_offsets_hours'])
             if expected['settle_status']!='OK':
                 if horizon=='H72':incomplete+=1
                 continue
@@ -34,11 +34,12 @@ def evaluate(log,settlements,cache_dir,protocol_path,now=None,preview=False):
             if row['benchmark_self']:btc.append(main['ret']);continue
             rows.append(dict(record_id=record['record_id'],symbol=record['symbol'],ts_utc=record['ts_utc'],
                              entry_ts=main['entry_ts'],alpha=main['alpha'],ret=main['ret'],fade=main['fade'],
-                             minus24=row['windows']['minus24']['alpha'],plus48=row['windows']['plus48']['alpha'],
+                             pre72=row['windows']['pre72']['alpha'],post72=row['windows']['post72']['alpha'],alpha_beta_adj=main['alpha_beta_adj'],
                              first_hit=main['first_hit'],side='BUY' if r.ACTIONS[record['decision']['action']]>0 else 'SELL'))
     if not cohort:result={'verdict':'SAMPLE_TOO_SMALL','n':0,'days':0,'symbols':[],'blocks':0,'greedy_n':0,'greedy_blocks':0}
     else:result=r.evaluate_rows(rows,min(x['ts_utc'] for x in cohort),now,p,preview)
-    result.update(protocol_id=pid,prompt_version=p['prompt_version'],incomplete=incomplete,
+    result.update(protocol_id=pid,prompt_version=p['prompt_version'],inputs_version=p['inputs_version'],
+                  excluded_inputs_version=sum(x.get('inputs_version')!=p['inputs_version'] for x in records.values()),incomplete=incomplete,
                   conflicts={'records':record_conflicts,'candles':sum(len(v[1]) for v in cache.values()),'settlements':len(conflicts)})
     # The preregistered gate suppresses outcome numbers unless preview is explicit.
     if result['verdict']!='SAMPLE_TOO_SMALL' or preview:
