@@ -32,13 +32,12 @@ class StatsService:
                 "fear_mentions": 0,
                 "greed_mentions": 0,
                 "polarity_score": 0.0,
-                "sentiment_label": "Neutral",
+                "sentiment_label": "Neutral / Mixed",
                 "stratified_sample": []
             }
 
         total_likes = 0
         total_retweets = 0
-        total_replies = 0
         authors = set()
         fear_count = 0
         greed_count = 0
@@ -46,11 +45,9 @@ class StatsService:
         for t in tweets:
             likes = t.get("likes", 0)
             retweets = t.get("retweets", 0)
-            replies = t.get("replies", 0)
 
             total_likes += likes
             total_retweets += retweets
-            total_replies += replies
 
             username = t.get("author_username") or "unknown"
             authors.add(username.lower())

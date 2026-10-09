@@ -34,6 +34,12 @@ class TypeSafeService:
         price = market_data.get("price")
         if not isinstance(price, (float, int)) or not math.isfinite(price) or price <= 0:
             return None
+        try:
+            self._trade_levels(price, market_data.get("tick_size"), "BUY")
+            self._trade_levels(price, market_data.get("tick_size"), "SELL")
+        except (ValueError, TypeError, ArithmeticError):
+            logger.warning("TypeSafe category=levels_infeasible")
+            return None
         funding_rate = market_data.get("funding_rate_pct")
         open_interest_usd = market_data.get("open_interest_usd")
         has_perpetuals = bool(market_data.get("has_perpetuals", False))
@@ -175,6 +181,30 @@ class TypeSafeService:
             raise ValueError("Invalid provider number")
         return float(value)
 
+    @staticmethod
+    def _trade_levels(price, tick_size, trade_action):
+        levels = None
+        if trade_action in ("BUY", "STRONG_BUY", "SELL", "STRONG_SELL"):
+            if tick_size is None or not math.isfinite(tick_size) or tick_size <= 0:
+                raise ValueError("Missing valid tick size")
+            p, tick = Decimal(str(price)), Decimal(str(tick_size))
+            def level(factor):
+                return float(((p * Decimal(factor) / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP)) * tick)
+            buy = "BUY" in trade_action
+            factors = ("0.995", "1.002", "0.962", "1.045", "1.085") if buy else ("0.998", "1.005", "1.038", "0.955", "0.915")
+            entry_min, entry_max, stop_loss, tp1, tp2 = map(level, factors)
+            ordered = (0 < stop_loss < entry_min <= price <= entry_max < tp1 < tp2) if buy else (0 < tp2 < tp1 < entry_min <= price <= entry_max < stop_loss)
+            if not ordered:
+                raise ValueError("Tick size collapses or reverses trade levels")
+            sl_pct, tp1_pct, tp2_pct = [(value / price - 1) * 100 for value in (stop_loss, tp1, tp2)]
+            levels = {"entry_range": [entry_min, entry_max], "stop_loss": stop_loss,
+                      "stop_loss_pct": sl_pct, "target_1": tp1, "target_1_pct": tp1_pct,
+                      "target_2": tp2, "target_2_pct": tp2_pct,
+                      "risk_reward_ratio": abs(tp2_pct / sl_pct), "tick_size": tick_size,
+                      "method": "fixed_percentage_heuristic"}
+
+        return levels
+
     def _build_decision_output(
         self,
         symbol: str,
@@ -207,25 +237,7 @@ class TypeSafeService:
                 self._number(value, 0, 100)
             if not math.isclose(sum(normalized_probs.values()), 100, abs_tol=1e-4):
                 raise ValueError("Invalid distribution sum")
-        levels = None
-        if trade_action in ("BUY", "STRONG_BUY", "SELL", "STRONG_SELL"):
-            if tick_size is None or not math.isfinite(tick_size) or tick_size <= 0:
-                raise ValueError("Missing valid tick size")
-            p, tick = Decimal(str(price)), Decimal(str(tick_size))
-            def level(factor):
-                return float(((p * Decimal(factor) / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP)) * tick)
-            buy = "BUY" in trade_action
-            factors = ("0.995", "1.002", "0.962", "1.045", "1.085") if buy else ("0.998", "1.005", "1.038", "0.955", "0.915")
-            entry_min, entry_max, stop_loss, tp1, tp2 = map(level, factors)
-            ordered = (0 < stop_loss < entry_min <= price <= entry_max < tp1 < tp2) if buy else (0 < tp2 < tp1 < entry_min <= price <= entry_max < stop_loss)
-            if not ordered:
-                raise ValueError("Tick size collapses or reverses trade levels")
-            sl_pct, tp1_pct, tp2_pct = [(value / price - 1) * 100 for value in (stop_loss, tp1, tp2)]
-            levels = {"entry_range": [entry_min, entry_max], "stop_loss": stop_loss,
-                      "stop_loss_pct": sl_pct, "target_1": tp1, "target_1_pct": tp1_pct,
-                      "target_2": tp2, "target_2_pct": tp2_pct,
-                      "risk_reward_ratio": abs(tp2_pct / sl_pct), "tick_size": tick_size,
-                      "method": "fixed_percentage_heuristic"}
+        levels = self._trade_levels(price, tick_size, trade_action)
 
         # Build dynamic rationale
         reasons = []
