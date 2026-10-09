@@ -111,3 +111,14 @@ def test_stratified_fifty_and_overlap_dedup():
     assert len(overlap)==25 and all(r['type']=='high_engagement' for r in overlap)
     duplicates=StatsService.process_tweets([tweet('same',likes=1),tweet('same',likes=2)])['stratified_sample']
     assert len(duplicates)==1 and duplicates[0]['likes']==2
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('price,tick,infeasible_side',[(100.1,1,'BUY'),(99.9,1,'SELL')])
+async def test_one_sided_infeasible_levels_prevent_model(model,caplog,price,tick,infeasible_side):
+    # FT-D1: the other direction stays feasible, so a precheck of only one side would still call the model.
+    service=TypeSafeService('synthetic')
+    service._trade_levels(price,tick,'SELL' if infeasible_side=='BUY' else 'BUY')
+    with pytest.raises((ValueError,TypeError,ArithmeticError)):
+        service._trade_levels(price,tick,infeasible_side)
+    assert await service.evaluate_decision('ETH',market(price,tick),{'sample_size':50}) is None
+    assert model.calls==0 and 'category=levels_infeasible' in caplog.text
