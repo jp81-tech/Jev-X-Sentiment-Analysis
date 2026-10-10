@@ -9,7 +9,7 @@ import re
 HOUR=3600
 H72=72*HOUR
 ACTIONS={'BUY':1,'STRONG_BUY':1,'SELL':-1,'STRONG_SELL':-1,'HOLD':0,'TAKE_PROFIT':0}
-PARAMS={'version':'2.2','placebo_offsets_hours':[-72,72],'costs':[.003,.005],'delta':.003,'min_n':30,'min_days':30,
+PARAMS={'version':'2.2.1','placebo_offsets_hours':[-72,72],'costs':[.003,.005],'delta':.003,'min_n':30,'min_days':30,
         'min_symbols':2,'min_blocks':10,'min_greedy':15,'block_seconds':H72,'permutations':1000,'seed':20261008}
 
 class InvalidData(ValueError):pass

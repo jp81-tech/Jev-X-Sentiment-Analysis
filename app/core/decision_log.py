@@ -35,6 +35,9 @@ def prompt_fingerprint(source):
         if isinstance(node, ast.AST):
             return {'node':type(node).__name__, **{key:normalized(value) for key,value in ast.iter_fields(node) if value is not None and value != []}}
         if isinstance(node,list):return [normalized(v) for v in node]
+        if isinstance(node, bytes):return {'literal_type':'bytes','hex':node.hex()}
+        if node is Ellipsis:return {'literal_type':'ellipsis'}
+        if isinstance(node, complex):return {'literal_type':'complex','real':node.real.hex(),'imag':node.imag.hex()}
         return node
     definitions = {}
     for node in method.body:
@@ -65,11 +68,19 @@ def inputs_fingerprint(stats_source, twitter_source, config_source):
         if isinstance(value, ast.AST):
             # Optional/empty fields are omitted consistently, never via ast.dump's
             # interpreter-dependent text defaults. Source locations are excluded.
+            fields = dict(ast.iter_fields(value))
+            if isinstance(value, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
+                body = fields.get('body', [])
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+                    fields['body'] = body[1:]
             return {'node': type(value).__name__, 'fields': {
-                key: normalized(item) for key, item in ast.iter_fields(value)
+                key: normalized(item) for key, item in fields.items()
                 if item is not None and item != []}}
         if isinstance(value, list):
             return [normalized(item) for item in value]
+        if isinstance(value, bytes):return {'literal_type':'bytes','hex':value.hex()}
+        if value is Ellipsis:return {'literal_type':'ellipsis'}
+        if isinstance(value, complex):return {'literal_type':'complex','real':value.real.hex(),'imag':value.imag.hex()}
         return value
     canonical = {key: normalized(value) for key, value in definitions.items()}
     return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(',', ':')).encode()).hexdigest()

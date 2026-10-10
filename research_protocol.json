@@ -1,5 +1,5 @@
 {
-  "version": "2.2",
+  "version": "2.2.1",
   "costs": [
     0.003,
     0.005
@@ -14,10 +14,10 @@
   "permutations": 1000,
   "seed": 20261008,
   "prompt_version": "670894ad859829fc4e80b00f3431a52bf5e06f5e17bfbbc6f1bbf050ca51e016",
-  "document_sha256": "db90c8f81a364a529452a8857977cffe400c36e48f88c8d732aa40963b321645",
+  "document_sha256": "bc3a264537ed154e7ae4b372765412f3a50f75131ba54b3bb1f62efb8817442e",
   "placebo_offsets_hours": [
     -72,
     72
   ],
-  "inputs_version": "dffcb5b7484b246b6d5c501f586e37ad8f3e750a0b3374ac964f36500ab8d0c7"
+  "inputs_version": "4c208f873aa60d8b2b6a3ce69ea436cb0f99bc58bf9551a5812f65b707a37061"
 }
